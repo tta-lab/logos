@@ -159,8 +159,8 @@ func TestRun_MaxStepsExhausted(t *testing.T) {
 	result, err := Run(context.Background(), cfg, nil, "go", Callbacks{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "max steps")
-	assert.Len(t, runner.calls, 3)           // exactly MaxSteps commands executed
-	assert.Len(t, result.Steps, 6)           // 3 assistant + 3 command steps
+	assert.Len(t, runner.calls, 3) // exactly MaxSteps commands executed
+	assert.Len(t, result.Steps, 6) // 3 assistant + 3 command steps
 }
 
 func TestRun_SandboxNonZeroExitIncludedInOutput(t *testing.T) {
