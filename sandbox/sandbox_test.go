@@ -57,7 +57,16 @@ func TestBuildEnv(t *testing.T) {
 
 	env := buildEnv(cfg, "")
 
-	assert.Contains(t, env, "PATH=/usr/bin:/usr/local/bin:/bin")
+	// PATH should include GOPATH/bin
+	pathEntry := ""
+	for _, e := range env {
+		if len(e) > 5 && e[:5] == "PATH=" {
+			pathEntry = e
+			break
+		}
+	}
+	assert.Contains(t, pathEntry, "/usr/bin:/usr/local/bin:/bin:")
+	assert.Contains(t, pathEntry, "/bin") // gopath/bin appended
 	assert.Contains(t, env, "HOME=/home/agent")
 	assert.Contains(t, env, "FOO=bar")
 	assert.Contains(t, env, "BAZ=qux")
@@ -66,7 +75,14 @@ func TestBuildEnv(t *testing.T) {
 func TestBuildEnv_Nil(t *testing.T) {
 	env := buildEnv(nil, "")
 
-	assert.Contains(t, env, "PATH=/usr/bin:/usr/local/bin:/bin")
+	pathEntry := ""
+	for _, e := range env {
+		if len(e) > 5 && e[:5] == "PATH=" {
+			pathEntry = e
+			break
+		}
+	}
+	assert.Contains(t, pathEntry, "/usr/bin:/usr/local/bin:/bin:")
 	assert.Len(t, env, 3) // PATH, HOME, TERM
 }
 

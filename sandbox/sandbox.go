@@ -5,7 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"time"
 
 	"cmp"
@@ -69,8 +71,12 @@ func runCmd(ctx context.Context, cmd *exec.Cmd) (stdout, stderr string, exitCode
 // homeDir sets HOME; if empty, defaults to "/home/agent".
 func buildEnv(cfg *ExecConfig, homeDir string) []string {
 	home := cmp.Or(homeDir, "/home/agent")
+	gopath := os.Getenv("GOPATH")
+	if gopath == "" {
+		gopath = filepath.Join(os.Getenv("HOME"), "go")
+	}
 	base := []string{
-		"PATH=/usr/bin:/usr/local/bin:/bin",
+		fmt.Sprintf("PATH=/usr/bin:/usr/local/bin:/bin:%s/bin", gopath),
 		"HOME=" + home,
 		"TERM=dumb",
 	}
