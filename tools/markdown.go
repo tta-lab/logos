@@ -271,7 +271,9 @@ func renderTree(headings []mdHeading, source []byte) string {
 // source is the raw markdown bytes. headings must already have IDs assigned.
 // section/tree/full correspond to the respective tool params.
 // warnKey/warnVal are the slog key-value pair used in the no-headings warning (e.g. "file", "/path/to/file.md").
-func renderMarkdownContent(source []byte, headings []mdHeading, section string, tree, full bool, treeThreshold int, warnKey, warnVal string) (fantasy.ToolResponse, error) {
+func renderMarkdownContent(
+	source []byte, headings []mdHeading, section string, tree, full bool, treeThreshold int, warnKey, warnVal string,
+) (fantasy.ToolResponse, error) {
 	result, err := RenderMarkdownContent(source, tree, section, full, treeThreshold)
 	if err != nil {
 		return fantasy.NewTextErrorResponse(fmt.Sprintf("Error: %v", err)), nil

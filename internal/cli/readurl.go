@@ -47,7 +47,9 @@ func runReadURL(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("fetch error: %w", err)
 	}
 
-	result, err := tools.RenderMarkdownContent([]byte(markdown), readURLFlags.tree, readURLFlags.section, readURLFlags.full, readURLFlags.treeThreshold)
+	result, err := tools.RenderMarkdownContent(
+		[]byte(markdown), readURLFlags.tree, readURLFlags.section, readURLFlags.full, readURLFlags.treeThreshold,
+	)
 	if err != nil {
 		return err
 	}
@@ -87,6 +89,6 @@ func init() {
 	readURLCmd.Flags().BoolVar(&readURLFlags.full, "full", false, "Force full content")
 	readURLCmd.Flags().IntVar(&readURLFlags.treeThreshold, "tree-threshold", 5000, "Char count for auto tree mode")
 	readURLCmd.Flags().StringVar(&readURLFlags.gatewayURL, "gateway-url", "", "Browser gateway URL")
-	readURLCmd.Flags().StringVar(&readURLFlags.cacheDir, "cache-dir", "", "Cache directory (default ~/.cache/logos/scrapes)")
+	readURLCmd.Flags().StringVar(&readURLFlags.cacheDir, "cache-dir", "", "Cache directory (default ~/.cache/logos/scrapes)") //nolint:lll
 	rootCmd.AddCommand(readURLCmd)
 }

@@ -29,7 +29,9 @@ Examples:
   logos read-md README.md --full         # full content`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		result, err := tools.ReadMarkdown(args[0], readMDFlags.tree, readMDFlags.section, readMDFlags.full, readMDFlags.treeThreshold)
+		result, err := tools.ReadMarkdown(
+			args[0], readMDFlags.tree, readMDFlags.section, readMDFlags.full, readMDFlags.treeThreshold,
+		)
 		if err != nil {
 			return err
 		}

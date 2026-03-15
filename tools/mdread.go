@@ -17,7 +17,9 @@ type MarkdownResult struct {
 // This is the core rendering logic — used by both ReadMarkdown (file) and the
 // read-url CLI (in-memory content). No fantasy dependency.
 // treeThreshold: auto-switch to tree above this char count (default 5000 if ≤ 0).
-func RenderMarkdownContent(source []byte, tree bool, section string, full bool, treeThreshold int) (*MarkdownResult, error) {
+func RenderMarkdownContent(
+	source []byte, tree bool, section string, full bool, treeThreshold int,
+) (*MarkdownResult, error) {
 	if treeThreshold <= 0 {
 		treeThreshold = 5000
 	}
