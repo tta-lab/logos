@@ -29,7 +29,7 @@ type PromptData struct {
 	WorkingDir string
 	Platform   string
 	Date       string
-	Commands   []CommandHelp // nil = all commands; use AllCommands() or tools.SelectCommands() to customize
+	Commands   []CommandHelp // nil defaults to AllCommands(); pass a subset to restrict the LLM's available actions
 }
 
 // BuildSystemPrompt renders the default system prompt with runtime context.
