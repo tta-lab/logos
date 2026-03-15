@@ -13,11 +13,13 @@ import (
 
 // --- mocks ---
 
+const mockProviderName = "mock"
+
 type mockProvider struct {
 	model *mockLanguageModel
 }
 
-func (p *mockProvider) Name() string { return "mock" }
+func (p *mockProvider) Name() string { return mockProviderName }
 func (p *mockProvider) LanguageModel(_ context.Context, _ string) (fantasy.LanguageModel, error) {
 	return p.model, nil
 }
@@ -27,15 +29,19 @@ type mockLanguageModel struct {
 	call      int
 }
 
-func (m *mockLanguageModel) Provider() string { return "mock" }
-func (m *mockLanguageModel) Model() string    { return "mock" }
+func (m *mockLanguageModel) Provider() string { return mockProviderName }
+func (m *mockLanguageModel) Model() string    { return mockProviderName }
 func (m *mockLanguageModel) Generate(_ context.Context, _ fantasy.Call) (*fantasy.Response, error) {
 	return nil, fmt.Errorf("not implemented")
 }
-func (m *mockLanguageModel) GenerateObject(_ context.Context, _ fantasy.ObjectCall) (*fantasy.ObjectResponse, error) {
+func (m *mockLanguageModel) GenerateObject(
+	_ context.Context, _ fantasy.ObjectCall,
+) (*fantasy.ObjectResponse, error) {
 	return nil, fmt.Errorf("not implemented")
 }
-func (m *mockLanguageModel) StreamObject(_ context.Context, _ fantasy.ObjectCall) (fantasy.ObjectStreamResponse, error) {
+func (m *mockLanguageModel) StreamObject(
+	_ context.Context, _ fantasy.ObjectCall,
+) (fantasy.ObjectStreamResponse, error) {
 	return nil, fmt.Errorf("not implemented")
 }
 func (m *mockLanguageModel) Stream(_ context.Context, _ fantasy.Call) (fantasy.StreamResponse, error) {
