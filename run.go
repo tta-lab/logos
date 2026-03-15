@@ -4,12 +4,11 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"charm.land/fantasy"
-	"github.com/tta-lab/logos/sandbox"
+	"github.com/tta-lab/temenos/client"
 )
 
 // StepRole represents the role of a message step in the agent loop.
@@ -33,9 +32,9 @@ type Config struct {
 	SystemPrompt string
 	MaxSteps     int // 0 means use default (DefaultMaxSteps)
 	MaxTokens    int // 0 means use default (DefaultMaxTokens)
-	Sandbox      sandbox.Sandbox
-	SandboxEnv   []string // extra env vars for sandbox
-	AllowedPaths []string // converted to sandbox mounts
+	Temenos      *client.Client
+	SandboxEnv   map[string]string    // env vars passed to temenos per-request
+	AllowedPaths []client.AllowedPath // paths passed to temenos per-request
 }
 
 // StepMessage represents one message generated during the agent loop.
@@ -72,13 +71,8 @@ func Run(
 	if cfg.Provider == nil {
 		return nil, fmt.Errorf("logos: Config.Provider must not be nil")
 	}
-	if cfg.Sandbox == nil {
-		return nil, fmt.Errorf("logos: Config.Sandbox must not be nil")
-	}
-
-	execCfg, err := buildExecConfig(cfg)
-	if err != nil {
-		return nil, err
+	if cfg.Temenos == nil {
+		return nil, fmt.Errorf("logos: Config.Temenos must not be nil")
 	}
 
 	model, err := cfg.Provider.LanguageModel(ctx, cfg.Model)
@@ -129,7 +123,7 @@ func Run(
 			cbs.OnCommandStart(cmd.Args)
 		}
 
-		output := execCommand(ctx, cfg.Sandbox, cmd.Args, execCfg)
+		output := execCommand(ctx, cfg.Temenos, cmd.Args, cfg.SandboxEnv, cfg.AllowedPaths)
 		steps = append(steps, StepMessage{Role: StepRoleCommand, Content: output, Timestamp: time.Now().UTC()})
 
 		assistantMsg := fantasy.Message{
@@ -146,32 +140,24 @@ func Run(
 	}, fmt.Errorf("logos: max steps (%d) reached", maxSteps)
 }
 
-// buildExecConfig validates AllowedPaths and constructs the sandbox ExecConfig.
-func buildExecConfig(cfg Config) (*sandbox.ExecConfig, error) {
-	var mounts []sandbox.Mount
-	for _, p := range cfg.AllowedPaths {
-		if p == "" || !filepath.IsAbs(p) {
-			return nil, fmt.Errorf("logos: AllowedPaths entry %q must be a non-empty absolute path", p)
-		}
-		mounts = append(mounts, sandbox.Mount{Source: p, Target: p, ReadOnly: true})
-	}
-	return &sandbox.ExecConfig{Env: cfg.SandboxEnv, MountDirs: mounts}, nil
-}
-
-// execCommand runs a shell command in the sandbox and returns formatted output.
-func execCommand(ctx context.Context, sb sandbox.Sandbox, args string, execCfg *sandbox.ExecConfig) string {
-	stdout, stderr, exitCode, execErr := sb.Exec(ctx, args, execCfg)
-	if execErr != nil {
-		slog.Warn("sandbox exec infrastructure failure", "args", args, "error", execErr)
-		return fmt.Sprintf("execution error: %v", execErr)
+// execCommand runs a shell command via the temenos daemon and returns formatted output.
+func execCommand(ctx context.Context, tc *client.Client, args string, env map[string]string, paths []client.AllowedPath) string {
+	resp, err := tc.Run(ctx, client.RunRequest{
+		Command:      args,
+		Env:          env,
+		AllowedPaths: paths,
+	})
+	if err != nil {
+		slog.Warn("temenos exec failure", "args", args, "error", err)
+		return fmt.Sprintf("execution error: %v", err)
 	}
 
-	output := stdout
-	if stderr != "" {
-		output += "\nSTDERR:\n" + stderr
+	output := resp.Stdout
+	if resp.Stderr != "" {
+		output += "\nSTDERR:\n" + resp.Stderr
 	}
-	if exitCode != 0 {
-		output += fmt.Sprintf("\n(exit code: %d)", exitCode)
+	if resp.ExitCode != 0 {
+		output += fmt.Sprintf("\n(exit code: %d)", resp.ExitCode)
 	}
 	if output == "" {
 		output = "(no output)"

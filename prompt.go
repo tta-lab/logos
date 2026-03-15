@@ -6,7 +6,7 @@ import (
 	"strings"
 	"text/template"
 
-	"github.com/tta-lab/logos/tools"
+	"github.com/tta-lab/temenos/tools"
 )
 
 //go:embed system.md.tpl

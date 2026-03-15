@@ -2,13 +2,18 @@ package logos
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"charm.land/fantasy"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/tta-lab/logos/sandbox"
+	"github.com/tta-lab/temenos/client"
 )
 
 // --- mocks ---
@@ -56,64 +61,68 @@ func (m *mockLanguageModel) Stream(_ context.Context, _ fantasy.Call) (fantasy.S
 	}, nil
 }
 
-type mockSandbox struct {
-	output   string
-	stderr   string
-	exitCode int
-	err      error
-	calls    []string
+// newTestTemenos starts a fake temenos HTTP server on a unix socket and returns a client.
+// Uses os.MkdirTemp with a short prefix to avoid macOS unix socket path length limit (104 chars).
+func newTestTemenos(t *testing.T, handler http.HandlerFunc) *client.Client {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "tm")
+	require.NoError(t, err)
+	t.Cleanup(func() { os.RemoveAll(dir) }) //nolint:errcheck
+	sockPath := filepath.Join(dir, "t.sock")
+	ln, err := net.Listen("unix", sockPath)
+	require.NoError(t, err)
+	srv := &http.Server{Handler: handler}
+	go srv.Serve(ln) //nolint:errcheck
+	t.Cleanup(func() { srv.Close() })
+	tc, err := client.New(sockPath)
+	require.NoError(t, err)
+	return tc
 }
 
-func (s *mockSandbox) Exec(_ context.Context, command string, _ *sandbox.ExecConfig) (string, string, int, error) {
-	s.calls = append(s.calls, command)
-	return s.output, s.stderr, s.exitCode, s.err
+// newTestTemenosWithOutput creates a test temenos server that returns the given stdout.
+func newTestTemenosWithOutput(t *testing.T, stdout string) *client.Client {
+	t.Helper()
+	return newTestTemenos(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(client.RunResponse{ //nolint:errcheck
+			Stdout:   stdout,
+			ExitCode: 0,
+		})
+	})
 }
 
-func (s *mockSandbox) IsAvailable() bool { return true }
-
-func newCfg(model *mockLanguageModel, sb sandbox.Sandbox) Config {
+func newCfg(model *mockLanguageModel, tc *client.Client) Config {
 	return Config{
 		Provider: &mockProvider{model: model},
 		Model:    "test",
-		Sandbox:  sb,
+		Temenos:  tc,
 	}
 }
 
 // --- tests ---
 
 func TestRun_NilProvider(t *testing.T) {
-	cfg := Config{Sandbox: &mockSandbox{}}
+	cfg := Config{}
 	_, err := Run(context.Background(), cfg, nil, "hello", Callbacks{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "Provider must not be nil")
 }
 
-func TestRun_NilSandbox(t *testing.T) {
+func TestRun_NilTemenos(t *testing.T) {
 	cfg := Config{Provider: &mockProvider{model: &mockLanguageModel{}}}
 	_, err := Run(context.Background(), cfg, nil, "hello", Callbacks{})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "Sandbox must not be nil")
-}
-
-func TestRun_InvalidAllowedPath(t *testing.T) {
-	model := &mockLanguageModel{}
-	sb := &mockSandbox{}
-	cfg := newCfg(model, sb)
-	cfg.AllowedPaths = []string{"relative/path"}
-	_, err := Run(context.Background(), cfg, nil, "hello", Callbacks{})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "AllowedPaths entry")
+	assert.Contains(t, err.Error(), "Temenos must not be nil")
 }
 
 func TestRun_NoCommand_ReturnsImmediately(t *testing.T) {
 	model := &mockLanguageModel{responses: []string{"Here is the answer."}}
-	sb := &mockSandbox{}
-	result, err := Run(context.Background(), newCfg(model, sb), nil, "question", Callbacks{})
+	tc := newTestTemenosWithOutput(t, "")
+	result, err := Run(context.Background(), newCfg(model, tc), nil, "question", Callbacks{})
 	require.NoError(t, err)
 	assert.Equal(t, "Here is the answer.", result.Response)
 	assert.Len(t, result.Steps, 1)
 	assert.Equal(t, StepRoleAssistant, result.Steps[0].Role)
-	assert.Empty(t, sb.calls)
 }
 
 func TestRun_OneCommandThenDone(t *testing.T) {
@@ -121,14 +130,13 @@ func TestRun_OneCommandThenDone(t *testing.T) {
 		"Let me check.\n$ ls -la",
 		"The files are: main.go",
 	}}
-	sb := &mockSandbox{output: "main.go\ngo.mod"}
-	result, err := Run(context.Background(), newCfg(model, sb), nil, "list files", Callbacks{})
+	tc := newTestTemenosWithOutput(t, "main.go\ngo.mod")
+	result, err := Run(context.Background(), newCfg(model, tc), nil, "list files", Callbacks{})
 	require.NoError(t, err)
 	assert.Equal(t, "Let me check.\n", result.Response[:len("Let me check.\n")])
 	assert.Contains(t, result.Response, "The files are: main.go")
 	assert.Len(t, result.Steps, 3) // assistant, command, assistant
 	assert.Equal(t, StepRoleCommand, result.Steps[1].Role)
-	assert.Equal(t, []string{"ls -la"}, sb.calls)
 }
 
 func TestRun_MaxStepsExhausted(t *testing.T) {
@@ -138,13 +146,12 @@ func TestRun_MaxStepsExhausted(t *testing.T) {
 		responses[i] = "$ echo loop"
 	}
 	model := &mockLanguageModel{responses: responses}
-	sb := &mockSandbox{output: "loop"}
-	cfg := newCfg(model, sb)
+	tc := newTestTemenosWithOutput(t, "loop")
+	cfg := newCfg(model, tc)
 	cfg.MaxSteps = 3
 	_, err := Run(context.Background(), cfg, nil, "go", Callbacks{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "max steps")
-	assert.Len(t, sb.calls, 3)
 }
 
 func TestRun_SandboxNonZeroExitIncludedInOutput(t *testing.T) {
@@ -152,8 +159,14 @@ func TestRun_SandboxNonZeroExitIncludedInOutput(t *testing.T) {
 		"$ false",
 		"got it",
 	}}
-	sb := &mockSandbox{output: "", stderr: "error msg", exitCode: 1}
-	result, err := Run(context.Background(), newCfg(model, sb), nil, "run", Callbacks{})
+	tc := newTestTemenos(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(client.RunResponse{ //nolint:errcheck
+			Stderr:   "error msg",
+			ExitCode: 1,
+		})
+	})
+	result, err := Run(context.Background(), newCfg(model, tc), nil, "run", Callbacks{})
 	require.NoError(t, err)
 	assert.Equal(t, StepRoleCommand, result.Steps[1].Role)
 	assert.Contains(t, result.Steps[1].Content, "(exit code: 1)")
@@ -162,10 +175,10 @@ func TestRun_SandboxNonZeroExitIncludedInOutput(t *testing.T) {
 
 func TestRun_OnCommandStartCallback(t *testing.T) {
 	model := &mockLanguageModel{responses: []string{"$ ls", "done"}}
-	sb := &mockSandbox{output: "file.go"}
+	tc := newTestTemenosWithOutput(t, "file.go")
 	var called []string
 	cbs := Callbacks{OnCommandStart: func(cmd string) { called = append(called, cmd) }}
-	_, err := Run(context.Background(), newCfg(model, sb), nil, "q", cbs)
+	_, err := Run(context.Background(), newCfg(model, tc), nil, "q", cbs)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"ls"}, called)
 }
