@@ -90,7 +90,8 @@ func init() {
 	readURLCmd.Flags().BoolVar(&readURLFlags.tree, "tree", false, "Force tree view")
 	readURLCmd.Flags().StringVar(&readURLFlags.section, "section", "", "Section ID to extract")
 	readURLCmd.Flags().BoolVar(&readURLFlags.full, "full", false, "Force full content")
-	readURLCmd.Flags().IntVar(&readURLFlags.treeThreshold, "tree-threshold", tools.DefaultTreeThreshold, "Char count for auto tree mode")
+	readURLCmd.Flags().IntVar(&readURLFlags.treeThreshold, "tree-threshold",
+		tools.DefaultTreeThreshold, "Char count for auto tree mode")
 	readURLCmd.Flags().StringVar(&readURLFlags.gatewayURL, "gateway-url", "", "Browser gateway URL")
 	readURLCmd.Flags().StringVar(&readURLFlags.cacheDir, "cache-dir", "", "Cache directory (default ~/.cache/logos/scrapes)") //nolint:lll
 	rootCmd.AddCommand(readURLCmd)
