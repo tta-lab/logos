@@ -75,15 +75,10 @@ func Run(
 		return nil, fmt.Errorf("logos: Config.Sandbox must not be nil")
 	}
 
-	// Build sandbox exec config from AllowedPaths.
-	var mounts []sandbox.Mount
-	for _, p := range cfg.AllowedPaths {
-		if p == "" || !filepath.IsAbs(p) {
-			return nil, fmt.Errorf("logos: AllowedPaths entry %q must be a non-empty absolute path", p)
-		}
-		mounts = append(mounts, sandbox.Mount{Source: p, Target: p, ReadOnly: true})
+	execCfg, err := buildExecConfig(cfg)
+	if err != nil {
+		return nil, err
 	}
-	execCfg := &sandbox.ExecConfig{Env: cfg.SandboxEnv, MountDirs: mounts}
 
 	model, err := cfg.Provider.LanguageModel(ctx, cfg.Model)
 	if err != nil {
@@ -111,7 +106,6 @@ func Run(
 	)
 
 	for step := 0; step < maxSteps; step++ {
-		// Stream one LLM turn.
 		fullText, streamErr := streamOneTurn(ctx, model, messages, maxTokens, func(text string) {
 			if cbs.OnDelta != nil {
 				cbs.OnDelta(text)
@@ -121,55 +115,22 @@ func Run(
 			return nil, fmt.Errorf("stream turn %d: %w", step, streamErr)
 		}
 
-		// Check for $ command in the response.
 		preText, cmd, found := scanForCommand(fullText)
-
-		// Record assistant step.
-		steps = append(steps, StepMessage{
-			Role:      StepRoleAssistant,
-			Content:   fullText,
-			Timestamp: time.Now().UTC(),
-		})
+		steps = append(steps, StepMessage{Role: StepRoleAssistant, Content: fullText, Timestamp: time.Now().UTC()})
 
 		if !found {
-			// No command — LLM is done.
 			responseText.WriteString(fullText)
-			return &RunResult{
-				Response: responseText.String(),
-				Steps:    steps,
-			}, nil
+			return &RunResult{Response: responseText.String(), Steps: steps}, nil
 		}
 
-		// Execute the command.
 		responseText.WriteString(preText)
 		if cbs.OnCommandStart != nil {
 			cbs.OnCommandStart(cmd.Args)
 		}
 
-		stdout, stderr, exitCode, execErr := cfg.Sandbox.Exec(ctx, cmd.Args, execCfg)
-		if execErr != nil {
-			stdout = fmt.Sprintf("execution error: %v", execErr)
-		}
+		output := execCommand(ctx, cfg.Sandbox, cmd.Args, execCfg)
+		steps = append(steps, StepMessage{Role: StepRoleCommand, Content: output, Timestamp: time.Now().UTC()})
 
-		output := stdout
-		if stderr != "" {
-			output += "\nSTDERR:\n" + stderr
-		}
-		if exitCode != 0 {
-			output += fmt.Sprintf("\n(exit code: %d)", exitCode)
-		}
-		if output == "" {
-			output = "(no output)"
-		}
-
-		// Record command output step.
-		steps = append(steps, StepMessage{
-			Role:      StepRoleCommand,
-			Content:   output,
-			Timestamp: time.Now().UTC(),
-		})
-
-		// Append assistant text + command output to conversation for next turn.
 		assistantMsg := fantasy.Message{
 			Role:    fantasy.MessageRoleAssistant,
 			Content: []fantasy.MessagePart{fantasy.TextPart{Text: fullText}},
@@ -182,6 +143,38 @@ func Run(
 		Response: responseText.String(),
 		Steps:    steps,
 	}, fmt.Errorf("logos: max steps (%d) reached", maxSteps)
+}
+
+// buildExecConfig validates AllowedPaths and constructs the sandbox ExecConfig.
+func buildExecConfig(cfg Config) (*sandbox.ExecConfig, error) {
+	var mounts []sandbox.Mount
+	for _, p := range cfg.AllowedPaths {
+		if p == "" || !filepath.IsAbs(p) {
+			return nil, fmt.Errorf("logos: AllowedPaths entry %q must be a non-empty absolute path", p)
+		}
+		mounts = append(mounts, sandbox.Mount{Source: p, Target: p, ReadOnly: true})
+	}
+	return &sandbox.ExecConfig{Env: cfg.SandboxEnv, MountDirs: mounts}, nil
+}
+
+// execCommand runs a shell command in the sandbox and returns formatted output.
+func execCommand(ctx context.Context, sb sandbox.Sandbox, args string, execCfg *sandbox.ExecConfig) string {
+	stdout, stderr, exitCode, execErr := sb.Exec(ctx, args, execCfg)
+	if execErr != nil {
+		stdout = fmt.Sprintf("execution error: %v", execErr)
+	}
+
+	output := stdout
+	if stderr != "" {
+		output += "\nSTDERR:\n" + stderr
+	}
+	if exitCode != 0 {
+		output += fmt.Sprintf("\n(exit code: %d)", exitCode)
+	}
+	if output == "" {
+		output = "(no output)"
+	}
+	return output
 }
 
 // scanForCommand finds the first $ command in text.
