@@ -269,8 +269,9 @@ func renderTree(headings []mdHeading, source []byte) string {
 
 // renderMarkdownContent applies the tree/section/full decision logic shared by read_md and read_url.
 // source is the raw markdown bytes. headings must already have IDs assigned.
-// section/tree/full correspond to the respective tool params. warnCtx is used in the slog warning key.
-func renderMarkdownContent(source []byte, headings []mdHeading, section string, tree, full bool, treeThreshold int, warnCtx string) (fantasy.ToolResponse, error) {
+// section/tree/full correspond to the respective tool params.
+// warnKey/warnVal are the slog key-value pair used in the no-headings warning (e.g. "file", "/path/to/file.md").
+func renderMarkdownContent(source []byte, headings []mdHeading, section string, tree, full bool, treeThreshold int, warnKey, warnVal string) (fantasy.ToolResponse, error) {
 	if section != "" {
 		extracted, err := extractSection(source, headings, section)
 		if err != nil {
@@ -282,7 +283,7 @@ func renderMarkdownContent(source []byte, headings []mdHeading, section string, 
 	charCount := utf8.RuneCountInString(string(source))
 	if tree || (!full && charCount > treeThreshold) {
 		if len(headings) == 0 {
-			slog.Warn("no headings found, returning full content", warnCtx, "")
+			slog.Warn("no headings found, returning full content", warnKey, warnVal)
 			return fantasy.NewTextResponse(truncateContent(string(source))), nil
 		}
 		return fantasy.NewTextResponse(renderTree(headings, source)), nil

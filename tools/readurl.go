@@ -84,7 +84,7 @@ func NewReadURLTool(backend ReadURLBackend, treeThreshold int) fantasy.AgentTool
 
 			source := []byte(page.markdown)
 
-			return renderMarkdownContent(source, page.headings, params.Section, params.Tree, params.Full, treeThreshold, "url")
+			return renderMarkdownContent(source, page.headings, params.Section, params.Tree, params.Full, treeThreshold, "url", params.URL)
 		},
 	)
 }

@@ -47,7 +47,7 @@ func NewReadMDTool(allowedPaths []string, treeThreshold int) fantasy.AgentTool {
 			headings := parseHeadings(source)
 			assignIDs(headings)
 
-			return renderMarkdownContent(source, headings, params.Section, params.Tree, params.Full, treeThreshold, "file")
+			return renderMarkdownContent(source, headings, params.Section, params.Tree, params.Full, treeThreshold, "file", params.FilePath)
 		},
 	)
 }
