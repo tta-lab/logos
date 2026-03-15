@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/tta-lab/logos/tools"
+	"github.com/tta-lab/temenos/tools"
 )
 
 func TestBuildSystemPrompt_AllFields(t *testing.T) {
