@@ -64,10 +64,6 @@ func ReadMarkdown(path string, tree bool, section string, full bool, treeThresho
 		return nil, err
 	}
 
-	if treeThreshold <= 0 {
-		treeThreshold = DefaultTreeThreshold
-	}
-
 	result, err := RenderMarkdownContent(source, tree, section, full, treeThreshold)
 	if err != nil {
 		return nil, err
