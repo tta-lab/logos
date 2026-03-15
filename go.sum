@@ -24,8 +24,8 @@ github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 h1:Jamvg5psRI
 github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu7U=
 github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
-github.com/tta-lab/temenos v0.1.0 h1:tvhmcIiXGgoAQ49+VPhhtvv6pSNo4Qk408g9qKwgYAU=
-github.com/tta-lab/temenos v0.1.0/go.mod h1:3iC34EMHVaF9evvPyBJPNUDBPTeyLFKJPvG73CvOlME=
+github.com/tta-lab/temenos v0.2.0 h1:1DXNCe81I/gtozgPhJSjZOetM3X2Ex13EipsDV0Ytc4=
+github.com/tta-lab/temenos v0.2.0/go.mod h1:3iC34EMHVaF9evvPyBJPNUDBPTeyLFKJPvG73CvOlME=
 github.com/yuin/goldmark v1.7.16 h1:n+CJdUxaFMiDUNnWC3dMWCIQJSkxH4uz3ZwQBkAlVNE=
 github.com/yuin/goldmark v1.7.16/go.mod h1:ip/1k0VRfGynBgxOz0yCqHrbZXhcjxyuS66Brc7iBKg=
 golang.org/x/net v0.52.0 h1:He/TN1l0e4mmR3QqHMT2Xab3Aj3L9qjbhRm78/6jrW0=

@@ -6,8 +6,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/tta-lab/temenos/tools"
 )
 
 func TestBuildSystemPrompt_AllFields(t *testing.T) {
@@ -77,7 +75,7 @@ func TestBuildSystemPrompt_WithCommands(t *testing.T) {
 	data := PromptData{
 		Platform: "linux",
 		Date:     "2026-03-12",
-		Commands: []tools.CommandHelp{
+		Commands: []CommandHelp{
 			{Name: "logos read", Summary: "Read a file", Help: "Read a file with line numbers."},
 			{Name: "rg", Summary: "Search files", Help: "Search file contents."},
 		},
@@ -92,12 +90,17 @@ func TestBuildSystemPrompt_WithCommands(t *testing.T) {
 	assert.Contains(t, result, "Search file contents.")
 }
 
-func TestBuildSystemPrompt_NoCommands_EmptySection(t *testing.T) {
-	data := PromptData{Platform: "linux", Date: "2026-03-12"}
-
+func TestBuildSystemPrompt_DefaultCommands(t *testing.T) {
+	data := PromptData{
+		WorkingDir: "/tmp",
+		Platform:   "linux/amd64",
+		Date:       "2026-01-01",
+		// Commands: nil → defaults to AllCommands
+	}
 	result, err := BuildSystemPrompt(data)
 	require.NoError(t, err)
-
-	assert.Contains(t, result, "## Available Commands")
-	assert.NotContains(t, result, "###") // no command subsections
+	// Should include all default command docs
+	assert.Contains(t, result, "temenos read-url")
+	assert.Contains(t, result, "temenos search")
+	assert.Contains(t, result, "rg")
 }
