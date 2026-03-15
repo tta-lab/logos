@@ -36,28 +36,12 @@ func NewReadTool(allowedPaths []string) fantasy.AgentTool {
 				return fantasy.NewTextErrorResponse(fmt.Sprintf("Error: access denied: %q is not within an allowed directory", params.FilePath)), nil //nolint:lll
 			}
 
-			info, err := os.Stat(params.FilePath)
-			if err != nil {
-				return fantasy.NewTextErrorResponse(fmt.Sprintf("Error: %v", err)), nil
-			}
-			if info.IsDir() {
-				return fantasy.NewTextErrorResponse(fmt.Sprintf("Error: %q is a directory, not a file", params.FilePath)), nil
-			}
-			if info.Size() > maxFileBytes {
-				return fantasy.NewTextErrorResponse(fmt.Sprintf("Error: file too large (%d bytes, max %d bytes)", info.Size(), maxFileBytes)), nil //nolint:lll
-			}
-
-			limit := params.Limit
-			if limit <= 0 {
-				limit = defaultReadLines
-			}
-
-			content, err := readTextFile(params.FilePath, params.Offset, limit)
+			result, err := ReadFile(params.FilePath, params.Offset, params.Limit)
 			if err != nil {
 				return fantasy.NewTextErrorResponse(fmt.Sprintf("Error: %v", err)), nil
 			}
 
-			return fantasy.NewTextResponse(addLineNumbers(content, params.Offset+1)), nil
+			return fantasy.NewTextResponse(result.Content), nil
 		},
 	)
 }

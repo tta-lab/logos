@@ -3,7 +3,6 @@ package tools
 import (
 	"context"
 	"fmt"
-	"os"
 
 	"charm.land/fantasy"
 )
@@ -31,23 +30,12 @@ func NewReadMDTool(allowedPaths []string, treeThreshold int) fantasy.AgentTool {
 				return fantasy.NewTextErrorResponse(fmt.Sprintf("Error: access denied: %q is not within an allowed directory", params.FilePath)), nil //nolint:lll
 			}
 
-			info, err := os.Stat(params.FilePath)
-			if err != nil {
-				return fantasy.NewTextErrorResponse(fmt.Sprintf("Error: %v", err)), nil
-			}
-			if info.IsDir() {
-				return fantasy.NewTextErrorResponse(fmt.Sprintf("Error: %q is a directory, not a file", params.FilePath)), nil
-			}
-
-			source, err := os.ReadFile(params.FilePath)
+			result, err := ReadMarkdown(params.FilePath, params.Tree, params.Section, params.Full, treeThreshold)
 			if err != nil {
 				return fantasy.NewTextErrorResponse(fmt.Sprintf("Error: %v", err)), nil
 			}
 
-			headings := parseHeadings(source)
-			assignIDs(headings)
-
-			return renderMarkdownContent(source, headings, params.Section, params.Tree, params.Full, treeThreshold, "file", params.FilePath)
+			return fantasy.NewTextResponse(result.Content), nil
 		},
 	)
 }
