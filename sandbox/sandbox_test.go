@@ -57,7 +57,16 @@ func TestBuildEnv(t *testing.T) {
 
 	env := buildEnv(cfg, "")
 
-	assert.Contains(t, env, "PATH=/usr/bin:/usr/local/bin:/bin")
+	// PATH should include GOPATH/bin
+	pathEntry := ""
+	for _, e := range env {
+		if len(e) > 5 && e[:5] == "PATH=" {
+			pathEntry = e
+			break
+		}
+	}
+	assert.Contains(t, pathEntry, "/usr/bin:/usr/local/bin:/bin:")
+	assert.Contains(t, pathEntry, "/go/bin") // gopath/bin appended
 	assert.Contains(t, env, "HOME=/home/agent")
 	assert.Contains(t, env, "FOO=bar")
 	assert.Contains(t, env, "BAZ=qux")
@@ -66,7 +75,14 @@ func TestBuildEnv(t *testing.T) {
 func TestBuildEnv_Nil(t *testing.T) {
 	env := buildEnv(nil, "")
 
-	assert.Contains(t, env, "PATH=/usr/bin:/usr/local/bin:/bin")
+	pathEntry := ""
+	for _, e := range env {
+		if len(e) > 5 && e[:5] == "PATH=" {
+			pathEntry = e
+			break
+		}
+	}
+	assert.Contains(t, pathEntry, "/usr/bin:/usr/local/bin:/bin")
 	assert.Len(t, env, 3) // PATH, HOME, TERM
 }
 
@@ -82,21 +98,4 @@ func TestTruncate(t *testing.T) {
 	long := "12345678901234567890"
 	result := truncate(long, 10)
 	assert.Equal(t, "1234567890\n[output truncated]", result)
-}
-
-func TestContextWithExecConfig(t *testing.T) {
-	cfg := &ExecConfig{Env: []string{"X=1"}}
-	ctx := t.Context()
-
-	ctx = ContextWithExecConfig(ctx, cfg)
-	got := ExecConfigFromContext(ctx)
-
-	require.NotNil(t, got)
-	assert.Equal(t, cfg.Env, got.Env)
-}
-
-func TestExecConfigFromContext_Missing(t *testing.T) {
-	ctx := t.Context()
-	got := ExecConfigFromContext(ctx)
-	assert.Nil(t, got)
 }

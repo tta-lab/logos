@@ -5,7 +5,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"time"
 
 	"cmp"
@@ -69,8 +72,21 @@ func runCmd(ctx context.Context, cmd *exec.Cmd) (stdout, stderr string, exitCode
 // homeDir sets HOME; if empty, defaults to "/home/agent".
 func buildEnv(cfg *ExecConfig, homeDir string) []string {
 	home := cmp.Or(homeDir, "/home/agent")
+	gopath := os.Getenv("GOPATH")
+	if gopath == "" {
+		if h := os.Getenv("HOME"); h != "" {
+			gopath = filepath.Join(h, "go")
+		} else {
+			slog.Warn("sandbox: GOPATH and HOME both unset, logos binary may not be on PATH")
+		}
+	}
+
+	path := "/usr/bin:/usr/local/bin:/bin"
+	if gopath != "" {
+		path += ":" + gopath + "/bin"
+	}
 	base := []string{
-		"PATH=/usr/bin:/usr/local/bin:/bin",
+		"PATH=" + path,
 		"HOME=" + home,
 		"TERM=dumb",
 	}

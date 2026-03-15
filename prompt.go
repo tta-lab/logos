@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"text/template"
+
+	"github.com/tta-lab/logos/tools"
 )
 
 //go:embed system.md.tpl
@@ -15,17 +17,10 @@ var systemPromptTmpl = template.Must(template.New("system").Parse(systemPromptTe
 
 // PromptData holds the runtime context used to render the default system prompt.
 type PromptData struct {
-	WorkingDir   string
-	Platform     string
-	Date         string
-	AllowedPaths []string
-	Tools        []ToolInfo
-}
-
-// ToolInfo holds a tool's name and full description for system prompt injection.
-type ToolInfo struct {
-	Name        string
-	Description string
+	WorkingDir string
+	Platform   string
+	Date       string
+	Commands   []tools.CommandHelp // selected per agent
 }
 
 // BuildSystemPrompt renders the default system prompt with runtime context.

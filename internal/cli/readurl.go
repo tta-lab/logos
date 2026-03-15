@@ -22,17 +22,10 @@ var readURLFlags struct {
 
 var readURLCmd = &cobra.Command{
 	Use:   "read-url <url>",
-	Short: "Fetch a URL and render as markdown",
-	Long: `Fetch a web page, convert HTML to clean markdown, with tree/section navigation.
-
-Uses defuddle (if installed) or browser-gateway for HTML extraction.
-
-Examples:
-  logos read-url https://go.dev/doc/effective_go              # auto: full or tree
-  logos read-url https://go.dev/doc/effective_go --tree        # heading tree
-  logos read-url https://go.dev/doc/effective_go --section 3K  # specific section`,
-	Args: cobra.ExactArgs(1),
-	RunE: runReadURL,
+	Short: tools.ReadURLCommand.Summary,
+	Long:  tools.ReadURLCommand.Help,
+	Args:  cobra.ExactArgs(1),
+	RunE:  runReadURL,
 }
 
 func runReadURL(cmd *cobra.Command, args []string) error {

@@ -142,3 +142,14 @@ func TestRenderTree_NestedHeadings(t *testing.T) {
 	subsectionIndent := len(subsectionLine) - len(strings.TrimLeft(subsectionLine, " │├└"))
 	assert.Greater(t, subsectionIndent, sectionIndent)
 }
+
+func TestTruncateContent_Short(t *testing.T) {
+	assert.Equal(t, "hello", truncateContent("hello"))
+}
+
+func TestTruncateContent_Long(t *testing.T) {
+	big := strings.Repeat("x", 200_000)
+	result := truncateContent(big)
+	assert.Less(t, len(result), len(big))
+	assert.Contains(t, result, "truncated")
+}
