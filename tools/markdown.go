@@ -21,8 +21,8 @@ type mdHeading struct {
 	id     string // 2-char base62 ID assigned by assignIDs
 }
 
-// defaultTreeThreshold is the character count above which markdown content returns a heading tree by default.
-const defaultTreeThreshold = 5000
+// DefaultTreeThreshold is the character count above which markdown content returns a heading tree by default.
+const DefaultTreeThreshold = 5000
 
 // base62Chars is the character set for ID generation.
 const base62Chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
@@ -271,25 +271,27 @@ func renderTree(headings []mdHeading, source []byte) string {
 // source is the raw markdown bytes. headings must already have IDs assigned.
 // section/tree/full correspond to the respective tool params.
 // warnKey/warnVal are the slog key-value pair used in the no-headings warning (e.g. "file", "/path/to/file.md").
-func renderMarkdownContent(source []byte, headings []mdHeading, section string, tree, full bool, treeThreshold int, warnKey, warnVal string) (fantasy.ToolResponse, error) {
-	if section != "" {
-		extracted, err := extractSection(source, headings, section)
-		if err != nil {
-			return fantasy.NewTextErrorResponse(fmt.Sprintf("Error: %v", err)), nil
-		}
-		return fantasy.NewTextResponse(extracted), nil
+//
+// Note: errors (e.g. "section not found") are embedded as fantasy.NewTextErrorResponse with a nil Go error.
+// This is intentional — the agent protocol expects tool calls to "succeed" with error content in the response
+// body. The CLI path (internal/cli/) correctly propagates errors via cobra's RunE return value.
+func renderMarkdownContent(
+	source []byte, headings []mdHeading, section string, tree, full bool, treeThreshold int, warnKey, warnVal string,
+) (fantasy.ToolResponse, error) {
+	result, err := RenderMarkdownContent(source, tree, section, full, treeThreshold)
+	if err != nil {
+		return fantasy.NewTextErrorResponse(fmt.Sprintf("Error: %v", err)), nil
 	}
 
-	charCount := utf8.RuneCountInString(string(source))
-	if tree || (!full && charCount > treeThreshold) {
-		if len(headings) == 0 {
+	// Log the no-headings warning with caller-provided context.
+	if result.Mode == "full" && !full && !tree && section == "" {
+		charCount := utf8.RuneCountInString(string(source))
+		if charCount > treeThreshold && len(headings) == 0 {
 			slog.Warn("no headings found, returning full content", warnKey, warnVal)
-			return fantasy.NewTextResponse(truncateContent(string(source))), nil
 		}
-		return fantasy.NewTextResponse(renderTree(headings, source)), nil
 	}
 
-	return fantasy.NewTextResponse(truncateContent(string(source))), nil
+	return fantasy.NewTextResponse(result.Content), nil
 }
 
 // formatNum formats an integer with thousands separators.

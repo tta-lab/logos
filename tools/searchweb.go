@@ -15,19 +15,36 @@ type SearchWebParams struct {
 	MaxResults int    `json:"max_results,omitempty" description:"Maximum number of results (default 10, max 20)"`
 }
 
+// newSearchHTTPClient creates an HTTP client tuned for repeated search requests.
+// Uses a cloned transport with connection pooling settings.
+func newSearchHTTPClient() *http.Client {
+	var transport *http.Transport
+	if t, ok := http.DefaultTransport.(*http.Transport); ok {
+		transport = t.Clone()
+	} else {
+		transport = &http.Transport{}
+	}
+	transport.MaxIdleConns = 100
+	transport.MaxIdleConnsPerHost = 10
+	transport.IdleConnTimeout = 90 * time.Second
+	return &http.Client{Timeout: 30 * time.Second, Transport: transport}
+}
+
+// normalizeMaxResults clamps maxResults to the [1, 20] range, defaulting to 10.
+func normalizeMaxResults(n int) int {
+	if n <= 0 {
+		return 10
+	}
+	if n > 20 {
+		return 20
+	}
+	return n
+}
+
 // NewSearchWebTool creates a web search tool using DuckDuckGo Lite.
 func NewSearchWebTool(client *http.Client) fantasy.AgentTool {
 	if client == nil {
-		var transport *http.Transport
-		if t, ok := http.DefaultTransport.(*http.Transport); ok {
-			transport = t.Clone()
-		} else {
-			transport = &http.Transport{}
-		}
-		transport.MaxIdleConns = 100
-		transport.MaxIdleConnsPerHost = 10
-		transport.IdleConnTimeout = 90 * time.Second
-		client = &http.Client{Timeout: 30 * time.Second, Transport: transport}
+		client = newSearchHTTPClient()
 	}
 
 	return fantasy.NewParallelAgentTool(
@@ -37,13 +54,7 @@ func NewSearchWebTool(client *http.Client) fantasy.AgentTool {
 			if params.Query == "" {
 				return fantasy.NewTextErrorResponse("query is required"), nil
 			}
-			maxResults := params.MaxResults
-			if maxResults <= 0 {
-				maxResults = 10
-			}
-			if maxResults > 20 {
-				maxResults = 20
-			}
+			maxResults := normalizeMaxResults(params.MaxResults)
 
 			if err := maybeDelaySearch(ctx); err != nil {
 				return fantasy.NewTextErrorResponse("search cancelled: " + err.Error()), nil

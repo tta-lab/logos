@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -21,9 +22,10 @@ type CachedFetchBackend struct {
 }
 
 // NewCachedFetchBackend creates a CachedFetchBackend wrapping the given fallback.
-// cacheDir is created if it doesn't exist (best-effort; logs warning on failure).
+// cacheDir is created if it doesn't exist (best-effort; warns to stderr and slog on failure).
 func NewCachedFetchBackend(cacheDir string, fallback ReadURLBackend) *CachedFetchBackend {
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: cachedfetch: failed to create cache dir %q: %v\n", cacheDir, err)
 		slog.Warn("cachedfetch: failed to create cache dir, caching disabled", "dir", cacheDir, "error", err)
 	}
 	return &CachedFetchBackend{cacheDir: cacheDir, fallback: fallback}
@@ -48,6 +50,9 @@ func (b *CachedFetchBackend) readCache(rawURL string) (string, bool) {
 	path := b.cachePath(rawURL)
 	data, err := os.ReadFile(path)
 	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			slog.Warn("cachedfetch: unexpected cache read error, treating as miss", "path", path, "error", err)
+		}
 		return "", false
 	}
 	return string(data), true
