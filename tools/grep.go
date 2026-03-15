@@ -118,7 +118,10 @@ func grepDir(ctx context.Context, re *regexp.Regexp, root, globPattern string, s
 		// Apply glob filter if provided.
 		if globPattern != "" {
 			matched, err := filepath.Match(globPattern, d.Name())
-			if err != nil || !matched {
+			if err != nil {
+				return err // ErrBadPattern — surface to caller rather than silently excluding all files
+			}
+			if !matched {
 				return nil
 			}
 		}

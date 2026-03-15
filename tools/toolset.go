@@ -10,10 +10,10 @@ import (
 // Panics if sbx or fetchBackend is nil.
 func NewDefaultToolSet(sbx sandbox.Sandbox, fetchBackend ReadURLBackend, allowedPaths []string, treeThreshold int) []fantasy.AgentTool { //nolint:lll
 	if sbx == nil {
-		panic("agentloop/tools: NewDefaultToolSet: sbx must not be nil")
+		panic("logos/tools: NewDefaultToolSet: sbx must not be nil")
 	}
 	if fetchBackend == nil {
-		panic("agentloop/tools: NewDefaultToolSet: fetchBackend must not be nil")
+		panic("logos/tools: NewDefaultToolSet: fetchBackend must not be nil")
 	}
 	tools := []fantasy.AgentTool{
 		NewBashTool(sbx),

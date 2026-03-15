@@ -85,14 +85,14 @@ func Run(
 	cbs Callbacks,
 ) (*RunResult, error) {
 	if cfg.Provider == nil {
-		return nil, fmt.Errorf("agentloop: Config.Provider must not be nil")
+		return nil, fmt.Errorf("logos: Config.Provider must not be nil")
 	}
 
 	// Validate and convert AllowedPaths into sandbox mounts.
 	var mounts []sandbox.Mount
 	for _, p := range cfg.AllowedPaths {
 		if p == "" || !filepath.IsAbs(p) {
-			return nil, fmt.Errorf("agentloop: AllowedPaths entry %q must be a non-empty absolute path", p)
+			return nil, fmt.Errorf("logos: AllowedPaths entry %q must be a non-empty absolute path", p)
 		}
 		mounts = append(mounts, sandbox.Mount{Source: p, Target: p, ReadOnly: true})
 	}

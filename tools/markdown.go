@@ -3,9 +3,11 @@ package tools
 import (
 	"crypto/sha256"
 	"fmt"
+	"log/slog"
 	"strings"
 	"unicode/utf8"
 
+	"charm.land/fantasy"
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
 	goldmarktext "github.com/yuin/goldmark/text"
@@ -18,6 +20,9 @@ type mdHeading struct {
 	offset int    // byte offset of the heading line in source
 	id     string // 2-char base62 ID assigned by assignIDs
 }
+
+// defaultTreeThreshold is the character count above which markdown content returns a heading tree by default.
+const defaultTreeThreshold = 5000
 
 // base62Chars is the character set for ID generation.
 const base62Chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
@@ -58,7 +63,7 @@ func parseHeadings(source []byte) []mdHeading { //nolint:gocyclo
 	doc := md.Parser().Parse(reader)
 
 	var headings []mdHeading
-	_ = ast.Walk(doc, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
+	if err := ast.Walk(doc, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
 		if !entering {
 			return ast.WalkContinue, nil
 		}
@@ -93,7 +98,9 @@ func parseHeadings(source []byte) []mdHeading { //nolint:gocyclo
 			offset: offset,
 		})
 		return ast.WalkContinue, nil
-	})
+	}); err != nil {
+		slog.Warn("parseHeadings: ast.Walk returned an error", "error", err)
+	}
 
 	// Fix offsets: for ATX headings, goldmark gives the content start.
 	// We need to walk back to find the '#' characters.
@@ -258,6 +265,30 @@ func renderTree(headings []mdHeading, source []byte) string {
 
 	sb.WriteString("\nUse section: \"<id>\" to read a specific section, or full: true to read everything.\n")
 	return sb.String()
+}
+
+// renderMarkdownContent applies the tree/section/full decision logic shared by read_md and read_url.
+// source is the raw markdown bytes. headings must already have IDs assigned.
+// section/tree/full correspond to the respective tool params. warnCtx is used in the slog warning key.
+func renderMarkdownContent(source []byte, headings []mdHeading, section string, tree, full bool, treeThreshold int, warnCtx string) (fantasy.ToolResponse, error) {
+	if section != "" {
+		extracted, err := extractSection(source, headings, section)
+		if err != nil {
+			return fantasy.NewTextErrorResponse(fmt.Sprintf("Error: %v", err)), nil
+		}
+		return fantasy.NewTextResponse(extracted), nil
+	}
+
+	charCount := utf8.RuneCountInString(string(source))
+	if tree || (!full && charCount > treeThreshold) {
+		if len(headings) == 0 {
+			slog.Warn("no headings found, returning full content", warnCtx, "")
+			return fantasy.NewTextResponse(truncateContent(string(source))), nil
+		}
+		return fantasy.NewTextResponse(renderTree(headings, source)), nil
+	}
+
+	return fantasy.NewTextResponse(truncateContent(string(source))), nil
 }
 
 // formatNum formats an integer with thousands separators.

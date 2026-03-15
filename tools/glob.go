@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -46,7 +47,11 @@ func NewGlobTool(allowedPaths []string) fantasy.AgentTool {
 				for _, match := range matches {
 					absMatch := filepath.Join(searchDir, match)
 					info, err := os.Stat(absMatch)
-					if err != nil || info.IsDir() {
+					if err != nil {
+						slog.Warn("glob: skipping match, stat failed", "path", absMatch, "error", err)
+						continue
+					}
+					if info.IsDir() {
 						continue
 					}
 					entries = append(entries, fileEntry{path: absMatch, modTime: info.ModTime().UnixNano()})

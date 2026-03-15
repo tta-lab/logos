@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"cmp"
+	"log/slog"
 	"runtime"
 	"time"
 )
@@ -32,6 +33,7 @@ func New(opts Options) Sandbox {
 		}
 	}
 	if opts.AllowUnsandboxed {
+		slog.Warn("sandbox: no platform sandbox available, running without isolation", "os", runtime.GOOS)
 		return &NoopSandbox{Timeout: opts.Timeout}
 	}
 	return &UnavailableSandbox{Platform: runtime.GOOS}

@@ -68,7 +68,7 @@ func (c *pageCache) set(url string, page *cachedPage) {
 //   - DefuddleCLIBackend: shell out to `defuddle parse <url> --markdown` (for local/CLI use)
 func NewReadURLTool(backend ReadURLBackend, treeThreshold int) fantasy.AgentTool {
 	if treeThreshold <= 0 {
-		treeThreshold = 5000
+		treeThreshold = defaultTreeThreshold
 	}
 	cache := &pageCache{pages: make(map[string]*cachedPage)}
 
@@ -84,29 +84,7 @@ func NewReadURLTool(backend ReadURLBackend, treeThreshold int) fantasy.AgentTool
 
 			source := []byte(page.markdown)
 
-			// Section extraction mode.
-			if params.Section != "" {
-				section, err := extractSection(source, page.headings, params.Section)
-				if err != nil {
-					return fantasy.NewTextErrorResponse(fmt.Sprintf("Error: %v", err)), nil
-				}
-				return fantasy.NewTextResponse(section), nil
-			}
-
-			charCount := utf8.RuneCountInString(page.markdown)
-
-			// Tree mode (explicit or auto for large content).
-			if params.Tree || (!params.Full && charCount > treeThreshold) {
-				if len(page.headings) == 0 {
-					// No headings — return full content.
-					slog.Warn("read_url: no headings found, returning full content", "url", params.URL)
-					return fantasy.NewTextResponse(truncateContent(page.markdown)), nil
-				}
-				return fantasy.NewTextResponse(renderTree(page.headings, source)), nil
-			}
-
-			// Full mode (explicit or auto for small content).
-			return fantasy.NewTextResponse(truncateContent(page.markdown)), nil
+			return renderMarkdownContent(source, page.headings, params.Section, params.Tree, params.Full, treeThreshold, "url")
 		},
 	)
 }
