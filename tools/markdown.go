@@ -272,24 +272,20 @@ func renderTree(headings []mdHeading, source []byte) string {
 // section/tree/full correspond to the respective tool params.
 // warnKey/warnVal are the slog key-value pair used in the no-headings warning (e.g. "file", "/path/to/file.md").
 func renderMarkdownContent(source []byte, headings []mdHeading, section string, tree, full bool, treeThreshold int, warnKey, warnVal string) (fantasy.ToolResponse, error) {
-	if section != "" {
-		extracted, err := extractSection(source, headings, section)
-		if err != nil {
-			return fantasy.NewTextErrorResponse(fmt.Sprintf("Error: %v", err)), nil
-		}
-		return fantasy.NewTextResponse(extracted), nil
+	result, err := RenderMarkdownContent(source, tree, section, full, treeThreshold)
+	if err != nil {
+		return fantasy.NewTextErrorResponse(fmt.Sprintf("Error: %v", err)), nil
 	}
 
-	charCount := utf8.RuneCountInString(string(source))
-	if tree || (!full && charCount > treeThreshold) {
-		if len(headings) == 0 {
+	// Log the no-headings warning with caller-provided context.
+	if result.Mode == "full" && !full && !tree && section == "" {
+		charCount := utf8.RuneCountInString(string(source))
+		if charCount > treeThreshold && len(headings) == 0 {
 			slog.Warn("no headings found, returning full content", warnKey, warnVal)
-			return fantasy.NewTextResponse(truncateContent(string(source))), nil
 		}
-		return fantasy.NewTextResponse(renderTree(headings, source)), nil
 	}
 
-	return fantasy.NewTextResponse(truncateContent(string(source))), nil
+	return fantasy.NewTextResponse(result.Content), nil
 }
 
 // formatNum formats an integer with thousands separators.
