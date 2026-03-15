@@ -6,9 +6,7 @@
 // network access, per-execution env vars, and timeout enforcement.
 //
 // Use New(Options) to get the appropriate sandbox for the current platform.
-// ExecConfig carries per-execution env vars and mounts, and is threaded through
-// context via ContextWithExecConfig / ExecConfigFromContext so tools can access
-// it without explicit parameter threading.
+// ExecConfig carries per-execution env vars and mounts passed directly to Exec.
 //
 // Plane: shared
 package sandbox

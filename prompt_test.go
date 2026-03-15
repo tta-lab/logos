@@ -6,6 +6,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/tta-lab/logos/tools"
 )
 
 func TestBuildSystemPrompt_AllFields(t *testing.T) {
@@ -69,4 +71,33 @@ func TestSystemPromptComposition_AppendsConsumerInstructions(t *testing.T) {
 	assert.Contains(t, combined, consumer)
 	assert.Greater(t, strings.Index(combined, consumer),
 		strings.Index(combined, "# Environment"))
+}
+
+func TestBuildSystemPrompt_WithCommands(t *testing.T) {
+	data := PromptData{
+		Platform: "linux",
+		Date:     "2026-03-12",
+		Commands: []tools.CommandHelp{
+			{Name: "logos read", Summary: "Read a file", Help: "Read a file with line numbers."},
+			{Name: "rg", Summary: "Search files", Help: "Search file contents."},
+		},
+	}
+
+	result, err := BuildSystemPrompt(data)
+	require.NoError(t, err)
+
+	assert.Contains(t, result, "### logos read")
+	assert.Contains(t, result, "Read a file with line numbers.")
+	assert.Contains(t, result, "### rg")
+	assert.Contains(t, result, "Search file contents.")
+}
+
+func TestBuildSystemPrompt_NoCommands_EmptySection(t *testing.T) {
+	data := PromptData{Platform: "linux", Date: "2026-03-12"}
+
+	result, err := BuildSystemPrompt(data)
+	require.NoError(t, err)
+
+	assert.Contains(t, result, "## Available Commands")
+	assert.NotContains(t, result, "###") // no command subsections
 }

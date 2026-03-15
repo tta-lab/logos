@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"text/template"
+
+	"github.com/tta-lab/logos/tools"
 )
 
 //go:embed system.md.tpl
@@ -18,6 +20,7 @@ type PromptData struct {
 	WorkingDir string
 	Platform   string
 	Date       string
+	Commands   []tools.CommandHelp // selected per agent
 }
 
 // BuildSystemPrompt renders the default system prompt with runtime context.

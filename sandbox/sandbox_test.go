@@ -84,19 +84,3 @@ func TestTruncate(t *testing.T) {
 	assert.Equal(t, "1234567890\n[output truncated]", result)
 }
 
-func TestContextWithExecConfig(t *testing.T) {
-	cfg := &ExecConfig{Env: []string{"X=1"}}
-	ctx := t.Context()
-
-	ctx = ContextWithExecConfig(ctx, cfg)
-	got := ExecConfigFromContext(ctx)
-
-	require.NotNil(t, got)
-	assert.Equal(t, cfg.Env, got.Env)
-}
-
-func TestExecConfigFromContext_Missing(t *testing.T) {
-	ctx := t.Context()
-	got := ExecConfigFromContext(ctx)
-	assert.Nil(t, got)
-}

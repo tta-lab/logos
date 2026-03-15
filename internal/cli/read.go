@@ -14,12 +14,8 @@ var readFlags struct {
 
 var readCmd = &cobra.Command{
 	Use:   "read <file>",
-	Short: "Read a file with line numbers",
-	Long: `Read a file with line numbers, offset/limit pagination, and safety guards.
-
-Examples:
-  logos read main.go                           # first 2000 lines
-  logos read main.go --offset 50 --limit 100   # lines 50-149`,
+	Short: tools.ReadCommand.Summary,
+	Long:  tools.ReadCommand.Help,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		result, err := tools.ReadFile(args[0], readFlags.offset, readFlags.limit)

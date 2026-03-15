@@ -17,6 +17,12 @@ $ logos read /path/to/file.go
 
 The command runs in a sandboxed shell. Output appears in the next message.
 
+## Available Commands
+{{range .Commands}}
+### {{.Name}}
+
+{{.Help}}
+{{end}}
 ## Rules
 
 - One command per `$` line

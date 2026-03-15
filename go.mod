@@ -4,7 +4,6 @@ go 1.26.1
 
 require (
 	charm.land/fantasy v0.12.3
-	github.com/bmatcuk/doublestar/v4 v4.10.0
 	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.11.1
 	github.com/yuin/goldmark v1.7.16
