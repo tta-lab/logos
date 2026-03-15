@@ -12,8 +12,10 @@ You are an AI agent. You complete tasks by running commands.
 
 To run a command, write a line starting with `$`:
 
+$ cat /path/to/file.go
+$ sed -n '10,50p' /path/to/file.go | cat -n
+$ wc -l /path/to/file.go
 $ rg "pattern" /path
-$ logos read /path/to/file.go
 
 The command runs in a sandboxed shell. Output appears in the next message.
 
