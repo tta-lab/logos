@@ -44,6 +44,6 @@ func init() {
 	readMDCmd.Flags().BoolVar(&readMDFlags.tree, "tree", false, "Force tree view")
 	readMDCmd.Flags().StringVar(&readMDFlags.section, "section", "", "Section ID to extract")
 	readMDCmd.Flags().BoolVar(&readMDFlags.full, "full", false, "Force full content")
-	readMDCmd.Flags().IntVar(&readMDFlags.treeThreshold, "tree-threshold", 5000, "Char count for auto tree mode")
+	readMDCmd.Flags().IntVar(&readMDFlags.treeThreshold, "tree-threshold", tools.DefaultTreeThreshold, "Char count for auto tree mode")
 	rootCmd.AddCommand(readMDCmd)
 }

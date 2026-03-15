@@ -20,7 +20,7 @@ type ReadMDParams struct {
 // Large files return a heading tree. Agent can override with tree/full/section flags.
 func NewReadMDTool(allowedPaths []string, treeThreshold int) fantasy.AgentTool {
 	if treeThreshold <= 0 {
-		treeThreshold = defaultTreeThreshold
+		treeThreshold = DefaultTreeThreshold
 	}
 	return fantasy.NewAgentTool(
 		"read_md",

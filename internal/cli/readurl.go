@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -44,7 +43,7 @@ func runReadURL(cmd *cobra.Command, args []string) error {
 
 	markdown, err := backend.Fetch(context.Background(), args[0])
 	if err != nil {
-		return fmt.Errorf("fetch error: %w", err)
+		return fmt.Errorf("fetch %s: %w", args[0], err)
 	}
 
 	result, err := tools.RenderMarkdownContent(
@@ -57,12 +56,16 @@ func runReadURL(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// resolveBackend selects a fetch backend in priority order:
+// 1. defuddle (if on PATH) — best local extraction quality
+// 2. BROWSER_GATEWAY_URL (or --gateway-url) — server-side extraction
+// 3. Error — neither available; user must install one or the other.
 func resolveBackend() (tools.ReadURLBackend, error) {
 	cacheDir := readURLFlags.cacheDir
 	if cacheDir == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
-			slog.Warn("could not determine home directory, using /tmp for cache", "error", err)
+			fmt.Fprintf(os.Stderr, "warning: could not determine home directory, using /tmp for cache: %v\n", err)
 			home = "/tmp"
 		}
 		cacheDir = filepath.Join(home, ".cache", "logos", "scrapes")
@@ -87,7 +90,7 @@ func init() {
 	readURLCmd.Flags().BoolVar(&readURLFlags.tree, "tree", false, "Force tree view")
 	readURLCmd.Flags().StringVar(&readURLFlags.section, "section", "", "Section ID to extract")
 	readURLCmd.Flags().BoolVar(&readURLFlags.full, "full", false, "Force full content")
-	readURLCmd.Flags().IntVar(&readURLFlags.treeThreshold, "tree-threshold", 5000, "Char count for auto tree mode")
+	readURLCmd.Flags().IntVar(&readURLFlags.treeThreshold, "tree-threshold", tools.DefaultTreeThreshold, "Char count for auto tree mode")
 	readURLCmd.Flags().StringVar(&readURLFlags.gatewayURL, "gateway-url", "", "Browser gateway URL")
 	readURLCmd.Flags().StringVar(&readURLFlags.cacheDir, "cache-dir", "", "Cache directory (default ~/.cache/logos/scrapes)") //nolint:lll
 	rootCmd.AddCommand(readURLCmd)

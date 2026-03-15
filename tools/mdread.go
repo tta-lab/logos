@@ -21,7 +21,7 @@ func RenderMarkdownContent(
 	source []byte, tree bool, section string, full bool, treeThreshold int,
 ) (*MarkdownResult, error) {
 	if treeThreshold <= 0 {
-		treeThreshold = 5000
+		treeThreshold = DefaultTreeThreshold
 	}
 
 	headings := parseHeadings(source)
@@ -65,7 +65,7 @@ func ReadMarkdown(path string, tree bool, section string, full bool, treeThresho
 	}
 
 	if treeThreshold <= 0 {
-		treeThreshold = 5000
+		treeThreshold = DefaultTreeThreshold
 	}
 
 	result, err := RenderMarkdownContent(source, tree, section, full, treeThreshold)

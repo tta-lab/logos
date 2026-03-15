@@ -68,7 +68,7 @@ func (c *pageCache) set(url string, page *cachedPage) {
 //   - DefuddleCLIBackend: shell out to `defuddle parse <url> --markdown` (for local/CLI use)
 func NewReadURLTool(backend ReadURLBackend, treeThreshold int) fantasy.AgentTool {
 	if treeThreshold <= 0 {
-		treeThreshold = defaultTreeThreshold
+		treeThreshold = DefaultTreeThreshold
 	}
 	cache := &pageCache{pages: make(map[string]*cachedPage)}
 
