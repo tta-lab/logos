@@ -3,6 +3,7 @@ package logos
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"strings"
 	"time"
@@ -161,7 +162,8 @@ func buildExecConfig(cfg Config) (*sandbox.ExecConfig, error) {
 func execCommand(ctx context.Context, sb sandbox.Sandbox, args string, execCfg *sandbox.ExecConfig) string {
 	stdout, stderr, exitCode, execErr := sb.Exec(ctx, args, execCfg)
 	if execErr != nil {
-		stdout = fmt.Sprintf("execution error: %v", execErr)
+		slog.Warn("sandbox exec infrastructure failure", "args", args, "error", execErr)
+		return fmt.Sprintf("execution error: %v", execErr)
 	}
 
 	output := stdout

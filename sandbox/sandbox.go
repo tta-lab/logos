@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -73,10 +74,19 @@ func buildEnv(cfg *ExecConfig, homeDir string) []string {
 	home := cmp.Or(homeDir, "/home/agent")
 	gopath := os.Getenv("GOPATH")
 	if gopath == "" {
-		gopath = filepath.Join(os.Getenv("HOME"), "go")
+		if h := os.Getenv("HOME"); h != "" {
+			gopath = filepath.Join(h, "go")
+		} else {
+			slog.Warn("sandbox: GOPATH and HOME both unset, logos binary may not be on PATH")
+		}
+	}
+
+	path := "/usr/bin:/usr/local/bin:/bin"
+	if gopath != "" {
+		path += ":" + gopath + "/bin"
 	}
 	base := []string{
-		fmt.Sprintf("PATH=/usr/bin:/usr/local/bin:/bin:%s/bin", gopath),
+		"PATH=" + path,
 		"HOME=" + home,
 		"TERM=dumb",
 	}

@@ -67,7 +67,7 @@ func (b *browserGatewayBackend) Fetch(ctx context.Context, url string) (string, 
 	defer resp.Body.Close() //nolint:errcheck
 
 	if resp.StatusCode >= 400 {
-		slog.Warn("browser-gateway returned error status", "url", url, "status", resp.StatusCode)
+		slog.Warn("browser-gateway returned error status", "gateway", b.gatewayURL, "url", url, "status", resp.StatusCode)
 		return "", fmt.Errorf("browser-gateway: HTTP %d", resp.StatusCode)
 	}
 

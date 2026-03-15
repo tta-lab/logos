@@ -70,14 +70,13 @@ var AllCommands = []CommandHelp{
 // SelectCommands returns CommandHelp entries matching the given names.
 // Names not found are silently skipped.
 func SelectCommands(names ...string) []CommandHelp {
-	m := make(map[string]CommandHelp, len(AllCommands))
-	for _, c := range AllCommands {
-		m[c.Name] = c
-	}
 	result := make([]CommandHelp, 0, len(names))
 	for _, name := range names {
-		if c, ok := m[name]; ok {
-			result = append(result, c)
+		for _, c := range AllCommands {
+			if c.Name == name {
+				result = append(result, c)
+				break
+			}
 		}
 	}
 	return result
