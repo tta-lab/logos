@@ -25,6 +25,12 @@ const DefaultMaxSteps = 30
 // DefaultMaxTokens is the fallback max output tokens when Config.MaxTokens is 0.
 const DefaultMaxTokens = 16384
 
+// CommandRunner executes a sandboxed command and returns the result.
+// *client.Client satisfies this interface automatically.
+type CommandRunner interface {
+	Run(ctx context.Context, req client.RunRequest) (*client.RunResponse, error)
+}
+
 // Config holds everything needed to run one agent loop iteration.
 type Config struct {
 	Provider     fantasy.Provider
@@ -32,9 +38,11 @@ type Config struct {
 	SystemPrompt string
 	MaxSteps     int // 0 means use default (DefaultMaxSteps)
 	MaxTokens    int // 0 means use default (DefaultMaxTokens)
-	Temenos      *client.Client
-	SandboxEnv   map[string]string    // env vars passed to temenos per-request
-	AllowedPaths []client.AllowedPath // paths passed to temenos per-request
+	Temenos      CommandRunner
+	SandboxEnv   map[string]string // env vars passed to temenos per-request
+	// AllowedPaths lists filesystem paths accessible during command execution.
+	// Path validation (non-empty, absolute) is enforced by the temenos daemon.
+	AllowedPaths []client.AllowedPath
 }
 
 // StepMessage represents one message generated during the agent loop.
@@ -142,7 +150,7 @@ func Run(
 
 // execCommand runs a shell command via the temenos daemon and returns formatted output.
 func execCommand(
-	ctx context.Context, tc *client.Client, args string,
+	ctx context.Context, tc CommandRunner, args string,
 	env map[string]string, paths []client.AllowedPath,
 ) string {
 	resp, err := tc.Run(ctx, client.RunRequest{
