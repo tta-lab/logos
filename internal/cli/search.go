@@ -16,7 +16,7 @@ var searchCmd = &cobra.Command{
 	Use:   "search <query>",
 	Short: tools.SearchCommand.Summary,
 	Long:  tools.SearchCommand.Help,
-	Args: cobra.ExactArgs(1),
+	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		result, err := tools.Search(context.Background(), args[0], searchFlags.maxResults)
 		if err != nil {

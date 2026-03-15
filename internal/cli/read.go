@@ -16,7 +16,7 @@ var readCmd = &cobra.Command{
 	Use:   "read <file>",
 	Short: tools.ReadCommand.Summary,
 	Long:  tools.ReadCommand.Help,
-	Args: cobra.ExactArgs(1),
+	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		result, err := tools.ReadFile(args[0], readFlags.offset, readFlags.limit)
 		if err != nil {

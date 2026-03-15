@@ -99,4 +99,3 @@ func TestTruncate(t *testing.T) {
 	result := truncate(long, 10)
 	assert.Equal(t, "1234567890\n[output truncated]", result)
 }
-

@@ -277,7 +277,6 @@ func renderTree(headings []mdHeading, source []byte) string {
 	return sb.String()
 }
 
-
 // formatNum formats an integer with thousands separators.
 func formatNum(n int) string {
 	s := fmt.Sprintf("%d", n)

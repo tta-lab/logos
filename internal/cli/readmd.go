@@ -18,7 +18,7 @@ var readMDCmd = &cobra.Command{
 	Use:   "read-md <file>",
 	Short: tools.ReadMDCommand.Summary,
 	Long:  tools.ReadMDCommand.Help,
-	Args: cobra.ExactArgs(1),
+	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		result, err := tools.ReadMarkdown(
 			args[0], readMDFlags.tree, readMDFlags.section, readMDFlags.full, readMDFlags.treeThreshold,

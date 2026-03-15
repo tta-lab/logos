@@ -30,8 +30,8 @@ type Config struct {
 	Provider     fantasy.Provider
 	Model        string
 	SystemPrompt string
-	MaxSteps     int      // 0 means use default (DefaultMaxSteps)
-	MaxTokens    int      // 0 means use default (DefaultMaxTokens)
+	MaxSteps     int // 0 means use default (DefaultMaxSteps)
+	MaxTokens    int // 0 means use default (DefaultMaxTokens)
 	Sandbox      sandbox.Sandbox
 	SandboxEnv   []string // extra env vars for sandbox
 	AllowedPaths []string // converted to sandbox mounts

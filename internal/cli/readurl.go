@@ -24,8 +24,8 @@ var readURLCmd = &cobra.Command{
 	Use:   "read-url <url>",
 	Short: tools.ReadURLCommand.Summary,
 	Long:  tools.ReadURLCommand.Help,
-	Args: cobra.ExactArgs(1),
-	RunE: runReadURL,
+	Args:  cobra.ExactArgs(1),
+	RunE:  runReadURL,
 }
 
 func runReadURL(cmd *cobra.Command, args []string) error {

@@ -12,13 +12,13 @@ func TestParseCommand(t *testing.T) {
 		{"$ rg 'pattern' /dir", "rg 'pattern' /dir", true},
 		{"$ logos read /path/to/file.go", "logos read /path/to/file.go", true},
 		{"$ logos search \"golang context\"", "logos search \"golang context\"", true},
-		{"  $ ls", "ls", true},   // leading whitespace OK
-		{"$", "", false},         // just dollar, no space
-		{"$ ", "", false},        // dollar + space, no command
+		{"  $ ls", "ls", true},    // leading whitespace OK
+		{"$", "", false},          // just dollar, no space
+		{"$ ", "", false},         // dollar + space, no command
 		{"echo hello", "", false}, // no $ prefix
-		{"", "", false},          // empty
-		{"# $ ls", "", false},    // commented out
-		{"$ls", "", false},       // no space after $
+		{"", "", false},           // empty
+		{"# $ ls", "", false},     // commented out
+		{"$ls", "", false},        // no space after $
 	}
 
 	for _, tt := range tests {
