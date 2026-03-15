@@ -6,7 +6,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/tta-lab/ttal-cli/pkg/agentloop/sandbox"
+	"github.com/tta-lab/logos/sandbox"
 )
 
 func TestNewBashTool_Constructs(t *testing.T) {

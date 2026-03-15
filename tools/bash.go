@@ -5,7 +5,7 @@ import (
 	"fmt"
 
 	"charm.land/fantasy"
-	"github.com/tta-lab/ttal-cli/pkg/agentloop/sandbox"
+	"github.com/tta-lab/logos/sandbox"
 )
 
 // BashParams are the input parameters for the bash tool.

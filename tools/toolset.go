@@ -2,7 +2,7 @@ package tools
 
 import (
 	"charm.land/fantasy"
-	"github.com/tta-lab/ttal-cli/pkg/agentloop/sandbox"
+	"github.com/tta-lab/logos/sandbox"
 )
 
 // NewDefaultToolSet creates the standard tool set: bash, read_url, search_web.

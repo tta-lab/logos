@@ -8,7 +8,7 @@ import (
 	"charm.land/fantasy"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/tta-lab/ttal-cli/pkg/agentloop/sandbox"
+	"github.com/tta-lab/logos/sandbox"
 )
 
 func TestEmbeddedDescriptions_NonEmpty(t *testing.T) {

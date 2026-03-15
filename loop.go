@@ -1,4 +1,4 @@
-package agentloop
+package logos
 
 import (
 	"context"
@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"charm.land/fantasy"
-	"github.com/tta-lab/ttal-cli/pkg/agentloop/sandbox"
+	"github.com/tta-lab/logos/sandbox"
 )
 
 // StepRole represents the role of a message step in the agent loop.

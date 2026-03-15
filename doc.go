@@ -5,4 +5,4 @@
 // sandbox env. No persistence — the caller receives StepMessages and handles storage.
 //
 // Plane: shared
-package agentloop
+package logos

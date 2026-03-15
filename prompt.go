@@ -1,4 +1,4 @@
-package agentloop
+package logos
 
 import (
 	_ "embed"
