@@ -13,7 +13,6 @@ import (
 	"charm.land/fantasy"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/tta-lab/temenos/client"
 )
 
 // --- mocks ---
@@ -63,12 +62,12 @@ func (m *mockLanguageModel) Stream(_ context.Context, _ fantasy.Call) (fantasy.S
 
 // mockRunner implements CommandRunner for unit tests.
 type mockRunner struct {
-	response client.RunResponse
+	response RunResponse
 	err      error
-	calls    []client.RunRequest
+	calls    []RunRequest
 }
 
-func (m *mockRunner) Run(_ context.Context, req client.RunRequest) (*client.RunResponse, error) {
+func (m *mockRunner) Run(_ context.Context, req RunRequest) (*RunResponse, error) {
 	m.calls = append(m.calls, req)
 	if m.err != nil {
 		return nil, m.err
@@ -79,7 +78,7 @@ func (m *mockRunner) Run(_ context.Context, req client.RunRequest) (*client.RunR
 
 // newTestTemenosServer starts a fake temenos HTTP server over a unix socket.
 // Uses os.MkdirTemp with a short prefix to avoid macOS unix socket path length limit (104 chars).
-func newTestTemenosServer(t *testing.T, handler http.HandlerFunc) *client.Client {
+func newTestTemenosServer(t *testing.T, handler http.HandlerFunc) CommandRunner {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "tm")
 	require.NoError(t, err)
@@ -90,7 +89,7 @@ func newTestTemenosServer(t *testing.T, handler http.HandlerFunc) *client.Client
 	srv := &http.Server{Handler: handler}
 	go srv.Serve(ln) //nolint:errcheck
 	t.Cleanup(func() { srv.Close() })
-	tc, err := client.New(sockPath)
+	tc, err := NewClient(sockPath)
 	require.NoError(t, err)
 	return tc
 }
@@ -135,7 +134,7 @@ func TestRun_OneCommandThenDone(t *testing.T) {
 		"Let me check.\n$ ls -la",
 		"The files are: main.go",
 	}}
-	runner := &mockRunner{response: client.RunResponse{Stdout: "main.go\ngo.mod"}}
+	runner := &mockRunner{response: RunResponse{Stdout: "main.go\ngo.mod"}}
 	result, err := Run(context.Background(), newCfg(model, runner), nil, "list files", Callbacks{})
 	require.NoError(t, err)
 	assert.Equal(t, "Let me check.\n", result.Response[:len("Let me check.\n")])
@@ -153,7 +152,7 @@ func TestRun_MaxStepsExhausted(t *testing.T) {
 		responses[i] = "$ echo loop"
 	}
 	model := &mockLanguageModel{responses: responses}
-	runner := &mockRunner{response: client.RunResponse{Stdout: "loop"}}
+	runner := &mockRunner{response: RunResponse{Stdout: "loop"}}
 	cfg := newCfg(model, runner)
 	cfg.MaxSteps = 3
 	result, err := Run(context.Background(), cfg, nil, "go", Callbacks{})
@@ -168,7 +167,7 @@ func TestRun_SandboxNonZeroExitIncludedInOutput(t *testing.T) {
 		"$ false",
 		"got it",
 	}}
-	runner := &mockRunner{response: client.RunResponse{Stderr: "error msg", ExitCode: 1}}
+	runner := &mockRunner{response: RunResponse{Stderr: "error msg", ExitCode: 1}}
 	result, err := Run(context.Background(), newCfg(model, runner), nil, "run", Callbacks{})
 	require.NoError(t, err)
 	assert.Equal(t, StepRoleCommand, result.Steps[1].Role)
@@ -178,7 +177,7 @@ func TestRun_SandboxNonZeroExitIncludedInOutput(t *testing.T) {
 
 func TestRun_OnCommandStartCallback(t *testing.T) {
 	model := &mockLanguageModel{responses: []string{"$ ls", "done"}}
-	runner := &mockRunner{response: client.RunResponse{Stdout: "file.go"}}
+	runner := &mockRunner{response: RunResponse{Stdout: "file.go"}}
 	var called []string
 	cbs := Callbacks{OnCommandStart: func(cmd string) { called = append(called, cmd) }}
 	_, err := Run(context.Background(), newCfg(model, runner), nil, "q", cbs)
@@ -186,16 +185,16 @@ func TestRun_OnCommandStartCallback(t *testing.T) {
 	assert.Equal(t, []string{"ls"}, called)
 }
 
-// TestRun_HttpServer_JsonEncodingRoundtrip verifies that the real client.Client
+// TestRun_HttpServer_JsonEncodingRoundtrip verifies that the real temenos client
 // correctly encodes requests and decodes responses end-to-end over a unix socket.
 func TestRun_HttpServer_JsonEncodingRoundtrip(t *testing.T) {
 	var receivedCmd string
 	tc := newTestTemenosServer(t, func(w http.ResponseWriter, r *http.Request) {
-		var req client.RunRequest
+		var req RunRequest
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
 		receivedCmd = req.Command
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(client.RunResponse{Stdout: "ok", ExitCode: 0}) //nolint:errcheck
+		json.NewEncoder(w).Encode(RunResponse{Stdout: "ok", ExitCode: 0}) //nolint:errcheck
 	})
 	model := &mockLanguageModel{responses: []string{"$ echo hi", "done"}}
 	cfg := newCfg(model, tc)

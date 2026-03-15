@@ -25,10 +25,20 @@ const DefaultMaxSteps = 30
 // DefaultMaxTokens is the fallback max output tokens when Config.MaxTokens is 0.
 const DefaultMaxTokens = 16384
 
+// Re-exported from temenos/client so consumers don't import temenos directly.
+type (
+	// AllowedPath specifies a filesystem path allowed in the sandbox.
+	AllowedPath = client.AllowedPath
+	// RunRequest is the request payload for sandboxed command execution.
+	RunRequest = client.RunRequest
+	// RunResponse is the response from sandboxed command execution.
+	RunResponse = client.RunResponse
+)
+
 // CommandRunner executes a sandboxed command and returns the result.
 // *client.Client satisfies this interface automatically.
 type CommandRunner interface {
-	Run(ctx context.Context, req client.RunRequest) (*client.RunResponse, error)
+	Run(ctx context.Context, req RunRequest) (*RunResponse, error)
 }
 
 // Config holds everything needed to run one agent loop iteration.
@@ -42,7 +52,7 @@ type Config struct {
 	SandboxEnv   map[string]string // env vars passed to temenos per-request
 	// AllowedPaths lists filesystem paths accessible during command execution.
 	// Path validation (non-empty, absolute) is enforced by the temenos daemon.
-	AllowedPaths []client.AllowedPath
+	AllowedPaths []AllowedPath
 }
 
 // StepMessage represents one message generated during the agent loop.
@@ -151,9 +161,9 @@ func Run(
 // execCommand runs a shell command via the temenos daemon and returns formatted output.
 func execCommand(
 	ctx context.Context, tc CommandRunner, args string,
-	env map[string]string, paths []client.AllowedPath,
+	env map[string]string, paths []AllowedPath,
 ) string {
-	resp, err := tc.Run(ctx, client.RunRequest{
+	resp, err := tc.Run(ctx, RunRequest{
 		Command:      args,
 		Env:          env,
 		AllowedPaths: paths,
