@@ -141,7 +141,10 @@ func Run(
 }
 
 // execCommand runs a shell command via the temenos daemon and returns formatted output.
-func execCommand(ctx context.Context, tc *client.Client, args string, env map[string]string, paths []client.AllowedPath) string {
+func execCommand(
+	ctx context.Context, tc *client.Client, args string,
+	env map[string]string, paths []client.AllowedPath,
+) string {
 	resp, err := tc.Run(ctx, client.RunRequest{
 		Command:      args,
 		Env:          env,
