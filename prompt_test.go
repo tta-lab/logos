@@ -71,36 +71,74 @@ func TestSystemPromptComposition_AppendsConsumerInstructions(t *testing.T) {
 		strings.Index(combined, "# Environment"))
 }
 
-func TestBuildSystemPrompt_WithCommands(t *testing.T) {
+func TestBuildSystemPrompt_NetworkAndReadFS(t *testing.T) {
 	data := PromptData{
 		Platform: "linux",
-		Date:     "2026-03-12",
-		Commands: []CommandHelp{
-			{Name: "logos read", Summary: "Read a file", Help: "Read a file with line numbers."},
-			{Name: "rg", Summary: "Search files", Help: "Search file contents."},
-		},
+		Date:     "2026-03-16",
+		Network:  true,
+		ReadFS:   true,
 	}
-
 	result, err := BuildSystemPrompt(data)
 	require.NoError(t, err)
 
-	assert.Contains(t, result, "### logos read")
-	assert.Contains(t, result, "Read a file with line numbers.")
+	// Available Commands section has all three
+	assert.Contains(t, result, "### temenos read-url")
+	assert.Contains(t, result, "### temenos search")
 	assert.Contains(t, result, "### rg")
-	assert.Contains(t, result, "Search file contents.")
+	// Inline examples show filesystem (ReadFS takes priority)
+	assert.Contains(t, result, "$ cat /path/to/file.go")
+	assert.Contains(t, result, "$ rg \"pattern\"")
+	// ReadFS rule present
+	assert.Contains(t, result, "Check file size with `wc -l`")
 }
 
-func TestBuildSystemPrompt_DefaultCommands(t *testing.T) {
+func TestBuildSystemPrompt_NetworkOnly(t *testing.T) {
 	data := PromptData{
-		WorkingDir: "/tmp",
-		Platform:   "linux/amd64",
-		Date:       "2026-01-01",
-		// Commands: nil → defaults to AllCommands
+		Platform: "linux",
+		Date:     "2026-03-16",
+		Network:  true,
 	}
 	result, err := BuildSystemPrompt(data)
 	require.NoError(t, err)
-	// Should include all default command docs
-	assert.Contains(t, result, "temenos read-url")
-	assert.Contains(t, result, "temenos search")
-	assert.Contains(t, result, "rg")
+
+	// Available Commands section has network commands only
+	assert.Contains(t, result, "### temenos read-url")
+	assert.Contains(t, result, "### temenos search")
+	assert.NotContains(t, result, "### rg")
+	// Inline examples show URL commands
+	assert.Contains(t, result, "$ temenos read-url")
+	assert.NotContains(t, result, "$ cat /path/to/file.go")
+	// No ReadFS rule
+	assert.NotContains(t, result, "Check file size with `wc -l`")
+}
+
+func TestBuildSystemPrompt_ReadFSOnly(t *testing.T) {
+	data := PromptData{
+		Platform: "linux",
+		Date:     "2026-03-16",
+		ReadFS:   true,
+	}
+	result, err := BuildSystemPrompt(data)
+	require.NoError(t, err)
+
+	assert.Contains(t, result, "### rg")
+	assert.Contains(t, result, "$ cat /path/to/file.go")
+	assert.NotContains(t, result, "### temenos read-url")
+	// ReadFS rule present
+	assert.Contains(t, result, "Check file size with `wc -l`")
+}
+
+func TestBuildSystemPrompt_NoCapabilities(t *testing.T) {
+	data := PromptData{
+		Platform: "linux",
+		Date:     "2026-03-16",
+	}
+	result, err := BuildSystemPrompt(data)
+	require.NoError(t, err)
+
+	assert.NotContains(t, result, "### rg")
+	assert.NotContains(t, result, "### temenos read-url")
+	assert.Contains(t, result, "# Running Commands")
+	// No ReadFS rule
+	assert.NotContains(t, result, "Check file size with `wc -l`")
 }
