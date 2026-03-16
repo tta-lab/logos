@@ -22,7 +22,6 @@ type PromptData struct {
 	Date       string
 	Network    bool // include read-url + search docs
 	ReadFS     bool // include rg + read-only filesystem docs
-	WriteFS    bool // (future) include file modification docs
 }
 
 // BuildSystemPrompt renders the default system prompt with runtime context.
@@ -44,7 +43,6 @@ func BuildSystemPrompt(data PromptData) (string, error) {
 		Commands:   commands,
 		Network:    data.Network,
 		ReadFS:     data.ReadFS,
-		WriteFS:    data.WriteFS,
 	}
 
 	var buf strings.Builder
@@ -62,5 +60,4 @@ type promptTplData struct {
 	Commands   []tools.CommandHelp
 	Network    bool
 	ReadFS     bool
-	WriteFS    bool
 }
