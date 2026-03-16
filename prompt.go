@@ -15,32 +15,52 @@ var systemPromptTemplate string
 // systemPromptTmpl is parsed once at init — surfaces syntax errors at startup.
 var systemPromptTmpl = template.Must(template.New("system").Parse(systemPromptTemplate))
 
-// CommandHelp re-exports tools.CommandHelp so consumers don't import temenos/tools directly.
-type CommandHelp = tools.CommandHelp
-
-// AllCommands returns the full set of available commands.
-// Re-exported from temenos/tools.
-func AllCommands() []CommandHelp {
-	return tools.AllCommands
-}
-
 // PromptData holds the runtime context used to render the default system prompt.
 type PromptData struct {
 	WorkingDir string
 	Platform   string
 	Date       string
-	Commands   []CommandHelp // nil defaults to AllCommands(); pass a subset to restrict the LLM's available actions
+	Network    bool // include read-url + search docs
+	ReadFS     bool // include rg + read-only filesystem docs
+	WriteFS    bool // (future) include file modification docs
 }
 
 // BuildSystemPrompt renders the default system prompt with runtime context.
 // The result is the base prompt — consumers append their own instructions after this.
 func BuildSystemPrompt(data PromptData) (string, error) {
-	if data.Commands == nil {
-		data.Commands = tools.AllCommands
+	// Build command list from capability switches.
+	var commands []tools.CommandHelp
+	if data.Network {
+		commands = append(commands, tools.ReadURLCommand, tools.SearchCommand)
 	}
+	if data.ReadFS {
+		commands = append(commands, tools.RGCommand)
+	}
+
+	tplData := promptTplData{
+		WorkingDir: data.WorkingDir,
+		Platform:   data.Platform,
+		Date:       data.Date,
+		Commands:   commands,
+		Network:    data.Network,
+		ReadFS:     data.ReadFS,
+		WriteFS:    data.WriteFS,
+	}
+
 	var buf strings.Builder
-	if err := systemPromptTmpl.Execute(&buf, data); err != nil {
+	if err := systemPromptTmpl.Execute(&buf, tplData); err != nil {
 		return "", fmt.Errorf("execute system prompt template: %w", err)
 	}
 	return buf.String(), nil
+}
+
+// promptTplData is the internal template data — keeps PromptData public API clean.
+type promptTplData struct {
+	WorkingDir string
+	Platform   string
+	Date       string
+	Commands   []tools.CommandHelp
+	Network    bool
+	ReadFS     bool
+	WriteFS    bool
 }
