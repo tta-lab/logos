@@ -5,7 +5,7 @@ go 1.26.1
 require (
 	charm.land/fantasy v0.12.3
 	github.com/stretchr/testify v1.11.1
-	github.com/tta-lab/temenos v0.2.0
+	github.com/tta-lab/temenos v0.2.1
 )
 
 require (
