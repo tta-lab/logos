@@ -32,10 +32,6 @@ func BuildSystemPrompt(data PromptData) (string, error) {
 	if data.Network {
 		commands = append(commands, tools.ReadURLCommand, tools.SearchCommand)
 	}
-	if data.ReadFS {
-		commands = append(commands, tools.RGCommand)
-	}
-
 	tplData := promptTplData{
 		WorkingDir: data.WorkingDir,
 		Platform:   data.Platform,

@@ -24,13 +24,30 @@ $ temenos search "query"
 {{- end}}
 
 The command runs in a sandboxed shell. Output appears in the next message.
-{{if .Commands}}
+{{if or .Commands .ReadFS}}
 ## Available Commands
 {{range .Commands}}
 ### {{.Name}}
 
 {{.Help}}
 {{end}}
+{{- if .ReadFS}}
+### rg
+
+Search file contents (ripgrep).
+
+Common flags:
+  --glob "*.go"   Filter by file pattern
+  -C 3            Show 3 lines of context
+  -i              Case insensitive
+  --type go       Filter by language
+  -l              List matching files only
+
+List files:
+  rg --files [path] --glob "*.ts" --sort modified
+
+rg respects .gitignore by default. Fast, recursive.
+{{- end}}
 {{- end}}
 ## Rules
 
