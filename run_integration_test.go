@@ -185,6 +185,41 @@ func TestRun_OnCommandStartCallback(t *testing.T) {
 	assert.Equal(t, []string{"ls"}, called)
 }
 
+func TestRun_XMLRetry_RecoversToDollarCommand(t *testing.T) {
+	// Turn 1: model outputs XML. Turn 2: model corrects to $ command. Turn 3: done.
+	model := &mockLanguageModel{responses: []string{
+		"<invoke name=\"rg\"><parameter name=\"pattern\">foo</parameter></invoke>",
+		"$ rg foo /path",
+		"Found it.",
+	}}
+	runner := &mockRunner{response: RunResponse{Stdout: "foo.go:1: foo"}}
+	result, err := Run(context.Background(), newCfg(model, runner), nil, "find foo", Callbacks{})
+	require.NoError(t, err)
+	assert.Contains(t, result.Response, "Found it.")
+	require.Len(t, runner.calls, 1) // command executed exactly once after recovery
+	assert.Equal(t, "rg foo /path", runner.calls[0].Command)
+	// Steps: xml-assistant, feedback, dollar-assistant, command-output, final-assistant
+	assert.Len(t, result.Steps, 5)
+	assert.Equal(t, StepRoleCommand, result.Steps[1].Role) // feedback step
+	assert.Contains(t, result.Steps[1].Content, "XML/structured tool_call format")
+}
+
+func TestRun_XMLRetry_ExhaustionReturnsError(t *testing.T) {
+	// All turns return XML — retries exhaust and we get an error.
+	xmlResponse := "<minimax:tool_call><invoke name=\"rg\"></invoke></minimax:tool_call>"
+	responses := make([]string, MaxXMLRetries+2)
+	for i := range responses {
+		responses[i] = xmlResponse
+	}
+	model := &mockLanguageModel{responses: responses}
+	runner := &mockRunner{}
+	result, err := Run(context.Background(), newCfg(model, runner), nil, "find", Callbacks{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "XML tool_call format")
+	assert.Empty(t, runner.calls) // runner never called
+	assert.NotNil(t, result)      // result returned for observability
+}
+
 // TestRun_HttpServer_JsonEncodingRoundtrip verifies that the real temenos client
 // correctly encodes requests and decodes responses end-to-end over a unix socket.
 func TestRun_HttpServer_JsonEncodingRoundtrip(t *testing.T) {

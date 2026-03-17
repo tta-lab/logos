@@ -25,6 +25,10 @@ const DefaultMaxSteps = 30
 // DefaultMaxTokens is the fallback max output tokens when Config.MaxTokens is 0.
 const DefaultMaxTokens = 16384
 
+// MaxXMLRetries is the number of times the loop will inject error feedback
+// when a model outputs XML tool_call format instead of $ commands.
+const MaxXMLRetries = 2
+
 // Re-exported from temenos/client so consumers don't import temenos directly.
 type (
 	// AllowedPath specifies a filesystem path allowed in the sandbox.
@@ -119,8 +123,6 @@ func Run(
 		xmlRetries   int
 	)
 
-	const maxXMLRetries = 2
-
 	for step := 0; step < maxSteps; step++ {
 		fullText, streamErr := streamOneTurn(ctx, model, messages, maxTokens, func(text string) {
 			if cbs.OnDelta != nil {
@@ -135,19 +137,19 @@ func Run(
 		steps = append(steps, StepMessage{Role: StepRoleAssistant, Content: fullText, Timestamp: time.Now().UTC()})
 
 		if !found {
-			if ContainsXMLToolCall(fullText) && xmlRetries < maxXMLRetries {
+			if ContainsXMLToolCall(fullText) && xmlRetries < MaxXMLRetries {
 				xmlRetries++
 				feedback := "Error: You used XML/structured tool_call format. This is not supported.\n" +
 					"Use $ command format instead. Example: $ rg 'pattern' /path\n" +
 					"Do NOT use <invoke>, <tool_call>, or XML tags. One command per $ line."
 				steps = append(steps, StepMessage{Role: StepRoleCommand, Content: feedback, Timestamp: time.Now().UTC()})
-				assistantPart := fantasy.TextPart{Text: fullText}
-				xmlMsg := fantasy.Message{
-					Role:    fantasy.MessageRoleAssistant,
-					Content: []fantasy.MessagePart{assistantPart},
-				}
-				messages = append(messages, xmlMsg, fantasy.NewUserMessage(feedback))
+				messages = append(messages, newAssistantMessage(fullText), fantasy.NewUserMessage(feedback))
+				step-- // don't count XML correction against step budget
 				continue
+			}
+			if ContainsXMLToolCall(fullText) {
+				return &RunResult{Response: responseText.String(), Steps: steps},
+					fmt.Errorf("logos: model persisted XML tool_call format after %d correction attempts", MaxXMLRetries)
 			}
 			responseText.WriteString(fullText)
 			return &RunResult{Response: responseText.String(), Steps: steps}, nil
@@ -161,12 +163,7 @@ func Run(
 		output := execCommand(ctx, cfg.Temenos, cmd.Args, cfg.SandboxEnv, cfg.AllowedPaths)
 		steps = append(steps, StepMessage{Role: StepRoleCommand, Content: output, Timestamp: time.Now().UTC()})
 
-		assistantMsg := fantasy.Message{
-			Role:    fantasy.MessageRoleAssistant,
-			Content: []fantasy.MessagePart{fantasy.TextPart{Text: fullText}},
-		}
-		messages = append(messages, assistantMsg)
-		messages = append(messages, fantasy.NewUserMessage(output))
+		messages = append(messages, newAssistantMessage(fullText), fantasy.NewUserMessage(output))
 	}
 
 	return &RunResult{
@@ -249,4 +246,12 @@ func streamOneTurn(
 		}
 	}
 	return fullText.String(), nil
+}
+
+// newAssistantMessage wraps text as a fantasy assistant message.
+func newAssistantMessage(text string) fantasy.Message {
+	return fantasy.Message{
+		Role:    fantasy.MessageRoleAssistant,
+		Content: []fantasy.MessagePart{fantasy.TextPart{Text: text}},
+	}
 }
