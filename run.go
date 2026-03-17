@@ -155,6 +155,17 @@ func Run(
 			return &RunResult{Response: responseText.String(), Steps: steps}, nil
 		}
 
+		// Reject multi-command turns — tell the model to run one at a time.
+		if countCommands(fullText) > 1 {
+			feedback := "Error: You wrote multiple $ commands in one message. " +
+				"Only one command per message is supported.\n" +
+				"Run one command, wait for its output, then run the next."
+			steps = append(steps, StepMessage{Role: StepRoleCommand, Content: feedback, Timestamp: time.Now().UTC()})
+			messages = append(messages, newAssistantMessage(fullText), fantasy.NewUserMessage(feedback))
+			step-- // don't count multi-command correction against step budget
+			continue
+		}
+
 		responseText.WriteString(preText)
 		if cbs.OnCommandStart != nil {
 			cbs.OnCommandStart(cmd.Args)
@@ -201,19 +212,76 @@ func execCommand(
 }
 
 // scanForCommand finds the first $ command in text.
+// If the command contains a heredoc (<<DELIM), captures lines through the
+// closing delimiter. Otherwise captures only the $ line.
 // Returns text before the command, the command, and whether one was found.
 func scanForCommand(text string) (preText string, cmd Command, found bool) {
 	lines := strings.Split(text, "\n")
 	for i, line := range lines {
-		if c, ok := ParseCommand(line); ok {
-			preText = strings.Join(lines[:i], "\n")
-			if preText != "" {
-				preText += "\n"
-			}
-			return preText, c, true
+		c, ok := ParseCommand(line)
+		if !ok {
+			continue
 		}
+
+		preText = strings.Join(lines[:i], "\n")
+		if preText != "" {
+			preText += "\n"
+		}
+
+		// Check for heredoc — if found, capture through closing delimiter
+		if delim, hasHeredoc := heredocDelimiter(c.Args); hasHeredoc {
+			// Scan remaining lines for the closing delimiter
+			for j := i + 1; j < len(lines); j++ {
+				if strings.TrimSpace(lines[j]) == delim || strings.TrimRight(lines[j], "\t") == delim {
+					// Capture from $ line through delimiter (inclusive)
+					fullBlock := strings.Join(lines[i:j+1], "\n")
+					c.Args = strings.TrimPrefix(strings.TrimSpace(fullBlock), "$ ")
+					c.Raw = fullBlock
+					return preText, c, true
+				}
+			}
+			// No closing delimiter found — fall through to single-line capture
+		}
+
+		return preText, c, true
 	}
 	return text, Command{}, false
+}
+
+// countCommands returns the number of $ command lines in text,
+// skipping $ lines that appear inside heredoc bodies.
+func countCommands(text string) int {
+	count := 0
+	lines := strings.Split(text, "\n")
+	var heredocDelim string // non-empty when inside a heredoc body
+
+	for i, line := range lines {
+		if heredocDelim != "" {
+			// Inside heredoc body — check for closing delimiter
+			if strings.TrimSpace(line) == heredocDelim || strings.TrimRight(line, "\t") == heredocDelim {
+				heredocDelim = ""
+			}
+			continue
+		}
+
+		c, ok := ParseCommand(line)
+		if !ok {
+			continue
+		}
+		count++
+
+		// Check if this command starts a heredoc
+		if delim, has := heredocDelimiter(c.Args); has {
+			// Only skip heredoc body if closing delimiter exists in remaining lines
+			for _, remaining := range lines[i+1:] {
+				if strings.TrimSpace(remaining) == delim || strings.TrimRight(remaining, "\t") == delim {
+					heredocDelim = delim
+					break
+				}
+			}
+		}
+	}
+	return count
 }
 
 // streamOneTurn streams a single LLM response (no tools).

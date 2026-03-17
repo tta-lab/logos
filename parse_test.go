@@ -2,6 +2,44 @@ package logos
 
 import "testing"
 
+func TestHeredocDelimiter(t *testing.T) {
+	tests := []struct {
+		args      string
+		wantDelim string
+		wantOK    bool
+	}{
+		// Standard forms
+		{"cat <<EOF", "EOF", true},
+		{"cat <<'EOF'", "EOF", true},
+		{"cat <<\"EOF\"", "EOF", true},
+		// Dash (tab-stripping) forms
+		{"cat <<-EOF", "EOF", true},
+		{"cat <<-'MARKER'", "MARKER", true},
+		{"cat <<- 'PLANEOF'", "PLANEOF", true},  // dash + space + quoted
+		{"cat <<-\"PLANEOF\"", "PLANEOF", true}, // dash + double-quoted
+		// With pipes and redirects
+		{"cat <<'EOF' | wc -l", "EOF", true},
+		{"cat <<'EOF' > out.txt", "EOF", true},
+		// No heredoc
+		{"ls -la", "", false},
+		{"echo hello", "", false},
+		// Edge cases
+		{"cat <<", "", false}, // no delimiter after <<
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.args, func(t *testing.T) {
+			delim, ok := heredocDelimiter(tt.args)
+			if ok != tt.wantOK {
+				t.Errorf("ok = %v, want %v", ok, tt.wantOK)
+			}
+			if delim != tt.wantDelim {
+				t.Errorf("delim = %q, want %q", delim, tt.wantDelim)
+			}
+		})
+	}
+}
+
 func TestContainsXMLToolCall(t *testing.T) {
 	tests := []struct {
 		name  string
