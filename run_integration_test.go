@@ -220,6 +220,58 @@ func TestRun_XMLRetry_ExhaustionReturnsError(t *testing.T) {
 	assert.NotNil(t, result)      // result returned for observability
 }
 
+func TestRun_MultiCommand_RejectsAndRetries(t *testing.T) {
+	// Turn 1: model outputs two $ commands (rejected, step not consumed).
+	// Turn 2: model corrects to single command. Turn 3: done.
+	model := &mockLanguageModel{responses: []string{
+		"$ pwd\n$ ls -la",
+		"$ pwd",
+		"Current dir is /home.",
+	}}
+	runner := &mockRunner{response: RunResponse{Stdout: "/home"}}
+	result, err := Run(context.Background(), newCfg(model, runner), nil, "where am I", Callbacks{})
+	require.NoError(t, err)
+	assert.Contains(t, result.Response, "Current dir is /home.")
+	require.Len(t, runner.calls, 1) // only the corrected single-command turn executed
+	assert.Equal(t, "pwd", runner.calls[0].Command)
+	// Steps: multi-assistant, rejection-feedback, single-assistant, command-output, final-assistant
+	assert.Len(t, result.Steps, 5)
+	assert.Equal(t, StepRoleCommand, result.Steps[1].Role)
+	assert.Contains(t, result.Steps[1].Content, "multiple $ commands")
+}
+
+func TestRun_MultiCommand_ExhaustionHitsMaxSteps(t *testing.T) {
+	// Multi-command rejection (not counted) then real commands exhaust step budget.
+	responses := make([]string, 20)
+	responses[0] = "$ cmd1\n$ cmd2" // rejected, step not consumed
+	for i := 1; i < len(responses); i++ {
+		responses[i] = "$ echo loop"
+	}
+	model := &mockLanguageModel{responses: responses}
+	runner := &mockRunner{response: RunResponse{Stdout: "loop"}}
+	cfg := newCfg(model, runner)
+	cfg.MaxSteps = 2
+	result, err := Run(context.Background(), cfg, nil, "go", Callbacks{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "max steps")
+	assert.Len(t, runner.calls, 2) // exactly MaxSteps real commands executed
+	assert.NotNil(t, result)
+}
+
+func TestRun_HeredocCommand_FullBlockSentToRunner(t *testing.T) {
+	// Model issues a heredoc command — runner must receive the complete multi-line block.
+	model := &mockLanguageModel{responses: []string{
+		"$ cat <<'EOF'\nline1\nline2\nEOF",
+		"Created.",
+	}}
+	runner := &mockRunner{response: RunResponse{Stdout: "ok"}}
+	result, err := Run(context.Background(), newCfg(model, runner), nil, "write file", Callbacks{})
+	require.NoError(t, err)
+	assert.Contains(t, result.Response, "Created.")
+	require.Len(t, runner.calls, 1)
+	assert.Equal(t, "cat <<'EOF'\nline1\nline2\nEOF", runner.calls[0].Command)
+}
+
 // TestRun_HttpServer_JsonEncodingRoundtrip verifies that the real temenos client
 // correctly encodes requests and decodes responses end-to-end over a unix socket.
 func TestRun_HttpServer_JsonEncodingRoundtrip(t *testing.T) {
