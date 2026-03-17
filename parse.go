@@ -26,6 +26,12 @@ func ParseCommand(line string) (Command, bool) {
 	}, true
 }
 
+// isHeredocClose reports whether line closes a heredoc with the given delimiter.
+// Handles plain close (TrimSpace) and <<- indented close (TrimRight tabs).
+func isHeredocClose(line, delim string) bool {
+	return strings.TrimSpace(line) == delim || strings.TrimRight(line, "\t") == delim
+}
+
 // heredocDelimiter extracts the delimiter from a heredoc operator in a command string.
 // Handles: <<EOF, <<'EOF', <<"EOF", <<-EOF, <<-'EOF', <<- 'EOF'
 // Returns the delimiter and true if found, or empty string and false if no heredoc.

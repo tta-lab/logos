@@ -232,7 +232,7 @@ func scanForCommand(text string) (preText string, cmd Command, found bool) {
 		if delim, hasHeredoc := heredocDelimiter(c.Args); hasHeredoc {
 			// Scan remaining lines for the closing delimiter
 			for j := i + 1; j < len(lines); j++ {
-				if strings.TrimSpace(lines[j]) == delim || strings.TrimRight(lines[j], "\t") == delim {
+				if isHeredocClose(lines[j], delim) {
 					// Capture from $ line through delimiter (inclusive)
 					fullBlock := strings.Join(lines[i:j+1], "\n")
 					c.Args = strings.TrimPrefix(strings.TrimSpace(fullBlock), "$ ")
@@ -258,7 +258,7 @@ func countCommands(text string) int {
 	for i, line := range lines {
 		if heredocDelim != "" {
 			// Inside heredoc body — check for closing delimiter
-			if strings.TrimSpace(line) == heredocDelim || strings.TrimRight(line, "\t") == heredocDelim {
+			if isHeredocClose(line, heredocDelim) {
 				heredocDelim = ""
 			}
 			continue
@@ -274,7 +274,7 @@ func countCommands(text string) int {
 		if delim, has := heredocDelimiter(c.Args); has {
 			// Only skip heredoc body if closing delimiter exists in remaining lines
 			for _, remaining := range lines[i+1:] {
-				if strings.TrimSpace(remaining) == delim || strings.TrimRight(remaining, "\t") == delim {
+				if isHeredocClose(remaining, delim) {
 					heredocDelim = delim
 					break
 				}
