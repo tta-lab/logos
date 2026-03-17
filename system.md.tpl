@@ -52,6 +52,8 @@ rg respects .gitignore by default. Fast, recursive.
 ## Rules
 
 - One command per `$` line
+- NEVER use XML, JSON, or structured tool_call format — only `$ command` lines
+- Do NOT wrap commands in tags like `<tool_call>`, `<invoke>`, or similar
 {{- if .ReadFS}}
 - Check file size with `wc -l` before reading large files
 {{- end}}
