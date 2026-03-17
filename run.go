@@ -116,7 +116,10 @@ func Run(
 	var (
 		steps        []StepMessage
 		responseText strings.Builder
+		xmlRetries   int
 	)
+
+	const maxXMLRetries = 2
 
 	for step := 0; step < maxSteps; step++ {
 		fullText, streamErr := streamOneTurn(ctx, model, messages, maxTokens, func(text string) {
@@ -132,6 +135,18 @@ func Run(
 		steps = append(steps, StepMessage{Role: StepRoleAssistant, Content: fullText, Timestamp: time.Now().UTC()})
 
 		if !found {
+			if ContainsXMLToolCall(fullText) && xmlRetries < maxXMLRetries {
+				xmlRetries++
+				feedback := "Error: You used XML/structured tool_call format. This is not supported.\n" +
+					"Use $ command format instead. Example: $ rg 'pattern' /path\n" +
+					"Do NOT use <invoke>, <tool_call>, or XML tags. One command per $ line."
+				steps = append(steps, StepMessage{Role: StepRoleCommand, Content: feedback, Timestamp: time.Now().UTC()})
+				messages = append(messages,
+					fantasy.Message{Role: fantasy.MessageRoleAssistant, Content: []fantasy.MessagePart{fantasy.TextPart{Text: fullText}}},
+					fantasy.NewUserMessage(feedback),
+				)
+				continue
+			}
 			responseText.WriteString(fullText)
 			return &RunResult{Response: responseText.String(), Steps: steps}, nil
 		}
