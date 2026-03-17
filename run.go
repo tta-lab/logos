@@ -141,10 +141,12 @@ func Run(
 					"Use $ command format instead. Example: $ rg 'pattern' /path\n" +
 					"Do NOT use <invoke>, <tool_call>, or XML tags. One command per $ line."
 				steps = append(steps, StepMessage{Role: StepRoleCommand, Content: feedback, Timestamp: time.Now().UTC()})
-				messages = append(messages,
-					fantasy.Message{Role: fantasy.MessageRoleAssistant, Content: []fantasy.MessagePart{fantasy.TextPart{Text: fullText}}},
-					fantasy.NewUserMessage(feedback),
-				)
+				assistantPart := fantasy.TextPart{Text: fullText}
+				xmlMsg := fantasy.Message{
+					Role:    fantasy.MessageRoleAssistant,
+					Content: []fantasy.MessagePart{assistantPart},
+				}
+				messages = append(messages, xmlMsg, fantasy.NewUserMessage(feedback))
 				continue
 			}
 			responseText.WriteString(fullText)
