@@ -25,3 +25,24 @@ func ParseCommand(line string) (Command, bool) {
 		Args: args,
 	}, true
 }
+
+// ContainsXMLToolCall returns true if text contains XML tool_call patterns
+// produced by models that default to structured format (e.g. minimax).
+// Used to detect wrong output format and trigger error feedback.
+func ContainsXMLToolCall(text string) bool {
+	for _, marker := range xmlToolCallMarkers {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// xmlToolCallMarkers are substrings that indicate a model used XML tool_call
+// format. Only includes patterns specific enough to avoid false positives
+// on prose mentioning XML concepts.
+var xmlToolCallMarkers = []string{
+	"<invoke name=",
+	"<tool_call>",
+	"<minimax:tool_call>",
+}
