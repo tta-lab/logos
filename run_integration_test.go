@@ -349,17 +349,16 @@ func TestRun_ConsecutiveCommands_SoftWarning(t *testing.T) {
 	runner := &mockRunner{response: RunResponse{Stdout: "ok"}}
 	result, err := Run(context.Background(), newCfg(model, runner), nil, "go", Callbacks{})
 	require.NoError(t, err)
-	var warningFound bool
+	var warningCount int
 	for _, s := range result.Steps {
 		if s.Role == StepRoleUser && strings.Contains(s.Content, "without explaining") {
-			warningFound = true
-			break
+			warningCount++
 		}
 	}
-	assert.True(t, warningFound, "expected soft warning at 10 consecutive commands")
+	assert.Equal(t, 1, warningCount, "soft warning should fire exactly once at SoftWarningThreshold")
 }
 
-func TestRun_ConsecutiveCommands_ResetOnText(t *testing.T) {
+func TestRun_ConsecutiveCommands_TextResponseTerminatesLoop(t *testing.T) {
 	responses := []string{
 		"$ echo 1", "$ echo 2", "$ echo 3", "$ echo 4", "$ echo 5",
 		"Halfway.",
@@ -390,8 +389,8 @@ func TestRun_ConsecutiveCommands_HardExit(t *testing.T) {
 	_, err := Run(context.Background(), cfg, nil, "go", Callbacks{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "consecutive command turns")
-	// Hard exit fires when consecutiveCmdTurns reaches 20 BEFORE executing that turn's commands.
-	// So turns 1-19 execute (19 runner calls), turn 20 exits before execution.
+	// Hard exit fires when the 20th command turn is attempted (consecutiveCmdTurns == 19 before check).
+	// Turns 0–18 execute (19 runner calls); turn 19 exits before execution.
 	assert.Len(t, runner.calls, 19)
 }
 

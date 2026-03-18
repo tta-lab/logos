@@ -172,30 +172,31 @@ func Run(
 
 		// Has commands — execute all sequentially
 		responseText.WriteString(preText)
-		consecutiveCmdTurns++
 
-		// Hard exit check — BEFORE executing commands (don't waste cycles on a degenerate turn)
-		if consecutiveCmdTurns >= HardExitThreshold {
+		// Hard exit check — BEFORE executing or incrementing (don't waste cycles on a degenerate turn).
+		// consecutiveCmdTurns reflects turns already executed, so the error is accurate.
+		if consecutiveCmdTurns+1 >= HardExitThreshold {
 			return &RunResult{Response: responseText.String(), Steps: steps},
 				fmt.Errorf("logos: %d consecutive command turns without a text response", consecutiveCmdTurns)
 		}
+		consecutiveCmdTurns++
 
 		// Execute each command via runAndNotify (fires OnCommandResult callback),
 		// then format output for LLM with exit code suffix.
 		userContent := strings.Join(executeCommands(ctx, cfg, cbs, cmds), "\n")
-		steps = append(steps, StepMessage{Role: StepRoleUser, Content: userContent, Timestamp: time.Now().UTC()})
-		messages = append(messages, newAssistantMessage(fullText), fantasy.NewUserMessage(userContent))
 
-		// Soft warning — inject after command output
+		// Soft warning — append to command output to avoid consecutive user messages,
+		// which some LLM providers reject.
 		if consecutiveCmdTurns == SoftWarningThreshold {
-			nudge := fmt.Sprintf(
-				"Note: You have run %d command turns without explaining your progress. "+
+			userContent += fmt.Sprintf(
+				"\n\nNote: You have run %d command turns without explaining your progress. "+
 					"Include a brief summary of what you've found before your next command.",
 				consecutiveCmdTurns,
 			)
-			steps = append(steps, StepMessage{Role: StepRoleUser, Content: nudge, Timestamp: time.Now().UTC()})
-			messages = append(messages, fantasy.NewUserMessage(nudge))
 		}
+
+		steps = append(steps, StepMessage{Role: StepRoleUser, Content: userContent, Timestamp: time.Now().UTC()})
+		messages = append(messages, newAssistantMessage(fullText), fantasy.NewUserMessage(userContent))
 	}
 
 	return &RunResult{
@@ -216,9 +217,13 @@ func runAndNotify(ctx context.Context, cfg Config, cbs Callbacks, args string) (
 
 // executeCommands runs each command sequentially, firing OnCommandStart per command,
 // and returns formatted output parts ready for joining into a user message.
+// Stops early if ctx is already cancelled before a command starts.
 func executeCommands(ctx context.Context, cfg Config, cbs Callbacks, cmds []Command) []string {
 	outputParts := make([]string, 0, len(cmds))
 	for _, cmd := range cmds {
+		if ctx.Err() != nil {
+			break
+		}
 		if cbs.OnCommandStart != nil {
 			cbs.OnCommandStart(cmd.Args)
 		}
@@ -266,6 +271,21 @@ func execCommand(
 	return output, resp.ExitCode
 }
 
+// captureHeredoc captures the full heredoc block for a command starting at lines[startIdx].
+// Returns the updated Command with Args/Raw set to the full block, and true if the
+// closing delimiter was found. If not found, returns the original Command unchanged.
+func captureHeredoc(lines []string, startIdx int, c Command, delim string) (Command, bool) {
+	for j := startIdx + 1; j < len(lines); j++ {
+		if isHeredocClose(lines[j], delim) {
+			fullBlock := strings.Join(lines[startIdx:j+1], "\n")
+			c.Args = strings.TrimPrefix(strings.TrimSpace(fullBlock), "$ ")
+			c.Raw = fullBlock
+			return c, true
+		}
+	}
+	return c, false
+}
+
 // scanForCommand finds the first $ command in text.
 // If the command contains a heredoc (<<DELIM), captures lines through the
 // closing delimiter. Otherwise captures only the $ line.
@@ -283,17 +303,9 @@ func scanForCommand(text string) (preText string, cmd Command, found bool) {
 			preText += "\n"
 		}
 
-		// Check for heredoc — if found, capture through closing delimiter
 		if delim, hasHeredoc := heredocDelimiter(c.Args); hasHeredoc {
-			// Scan remaining lines for the closing delimiter
-			for j := i + 1; j < len(lines); j++ {
-				if isHeredocClose(lines[j], delim) {
-					// Capture from $ line through delimiter (inclusive)
-					fullBlock := strings.Join(lines[i:j+1], "\n")
-					c.Args = strings.TrimPrefix(strings.TrimSpace(fullBlock), "$ ")
-					c.Raw = fullBlock
-					return preText, c, true
-				}
+			if captured, ok := captureHeredoc(lines, i, c, delim); ok {
+				return preText, captured, true
 			}
 			// No closing delimiter found — fall through to single-line capture
 		}
@@ -306,6 +318,7 @@ func scanForCommand(text string) (preText string, cmd Command, found bool) {
 // scanAllCommands extracts all $ commands from text, in order.
 // Returns the text before the first command and a slice of commands.
 // Heredoc bodies are captured as part of their parent command (not split).
+// Unclosed heredocs fall back to single-line capture with a warning.
 func scanAllCommands(text string) (preText string, cmds []Command) {
 	lines := strings.Split(text, "\n")
 	var heredocDelim string
@@ -328,16 +341,13 @@ func scanAllCommands(text string) (preText string, cmds []Command) {
 			firstCmdIdx = i
 		}
 
-		// Check for heredoc — capture through closing delimiter
 		if delim, hasHeredoc := heredocDelimiter(c.Args); hasHeredoc {
-			for j := i + 1; j < len(lines); j++ {
-				if isHeredocClose(lines[j], delim) {
-					fullBlock := strings.Join(lines[i:j+1], "\n")
-					c.Args = strings.TrimPrefix(strings.TrimSpace(fullBlock), "$ ")
-					c.Raw = fullBlock
-					heredocDelim = delim
-					break
-				}
+			if captured, ok := captureHeredoc(lines, i, c, delim); ok {
+				c = captured
+				heredocDelim = delim
+			} else {
+				slog.Warn("logos: unclosed heredoc — falling back to single-line capture",
+					"args", c.Args, "delimiter", delim)
 			}
 		}
 

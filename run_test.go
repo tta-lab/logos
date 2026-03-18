@@ -143,6 +143,7 @@ func TestScanAllCommands(t *testing.T) {
 		{"text before commands", "Let me check.\n$ pwd\n$ ls", "Let me check.\n", []string{"pwd", "ls"}},
 		{"heredoc counts as one", "$ cat <<'EOF'\nline1\nEOF\n$ ls", "", []string{"cat <<'EOF'\nline1\nEOF", "ls"}},
 		{"dollar in heredoc body ignored", "$ cat <<'EOF'\n$ fake\nEOF", "", []string{"cat <<'EOF'\n$ fake\nEOF"}},
+		{"unclosed heredoc fallback then command", "$ cat <<'EOF'\nno close\n$ ls", "", []string{"cat <<'EOF'", "ls"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
