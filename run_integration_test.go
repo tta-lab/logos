@@ -188,7 +188,7 @@ func TestRun_OnCommandStartCallback(t *testing.T) {
 	assert.Equal(t, []string{"ls"}, called)
 }
 
-func TestRun_XMLRetry_RecoversToDollarCommand(t *testing.T) {
+func TestRun_XMLRetry_RecoversToDollarCommand(t *testing.T) { //nolint:dupl
 	// Turn 1: model outputs XML. Turn 2: model corrects to $ command. Turn 3: done.
 	model := &mockLanguageModel{responses: []string{
 		"<invoke name=\"rg\"><parameter name=\"pattern\">foo</parameter></invoke>",
@@ -224,7 +224,7 @@ func TestRun_XMLRetry_ExhaustionReturnsError(t *testing.T) {
 	assert.NotNil(t, result)      // result returned for observability
 }
 
-func TestRun_MultiCommand_RejectsAndRetries(t *testing.T) {
+func TestRun_MultiCommand_RejectsAndRetries(t *testing.T) { //nolint:dupl
 	// Turn 1: model outputs two $ commands (rejected, step not consumed).
 	// Turn 2: model corrects to single command. Turn 3: done.
 	model := &mockLanguageModel{responses: []string{
