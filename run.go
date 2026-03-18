@@ -29,6 +29,10 @@ const DefaultMaxTokens = 16384
 // when a model outputs XML tool_call format instead of $ commands.
 const MaxXMLRetries = 2
 
+// MaxMultiCmdRetries is the number of times the loop will inject error feedback
+// when a model outputs multiple $ commands in one turn.
+const MaxMultiCmdRetries = 3
+
 // Re-exported from temenos/client so consumers don't import temenos directly.
 type (
 	// AllowedPath specifies a filesystem path allowed in the sandbox.
@@ -118,9 +122,10 @@ func Run(
 	messages = append(messages, fantasy.NewUserMessage(prompt))
 
 	var (
-		steps        []StepMessage
-		responseText strings.Builder
-		xmlRetries   int
+		steps           []StepMessage
+		responseText    strings.Builder
+		xmlRetries      int
+		multiCmdRetries int
 	)
 
 	for step := 0; step < maxSteps; step++ {
@@ -157,6 +162,11 @@ func Run(
 
 		// Reject multi-command turns — tell the model to run one at a time.
 		if countCommands(fullText) > 1 {
+			if multiCmdRetries >= MaxMultiCmdRetries {
+				return &RunResult{Response: responseText.String(), Steps: steps},
+					fmt.Errorf("logos: model persisted multi-command output after %d correction attempts", MaxMultiCmdRetries)
+			}
+			multiCmdRetries++
 			feedback := "Error: You wrote multiple $ commands in one message. " +
 				"Only one command per message is supported.\n" +
 				"Run one command, wait for its output, then run the next."
