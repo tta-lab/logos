@@ -140,8 +140,9 @@ func TestRun_OneCommandThenDone(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "Let me check.\n", result.Response[:len("Let me check.\n")])
 	assert.Contains(t, result.Response, "The files are: main.go")
-	assert.Len(t, result.Steps, 3) // assistant, command, assistant
-	assert.Equal(t, StepRoleUser, result.Steps[1].Role)
+	assert.Len(t, result.Steps, 3) // command, result, assistant
+	assert.Equal(t, StepRoleCommand, result.Steps[0].Role)
+	assert.Equal(t, StepRoleResult, result.Steps[1].Role)
 	assert.True(t, strings.HasPrefix(result.Steps[1].Content, "! "))
 	require.Len(t, runner.calls, 1)
 	assert.Equal(t, "ls -la", runner.calls[0].Command) // exact command forwarded unchanged
@@ -161,7 +162,7 @@ func TestRun_MaxStepsExhausted(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "max steps")
 	assert.Len(t, runner.calls, 3) // exactly MaxSteps commands executed
-	assert.Len(t, result.Steps, 6) // 3 assistant + 3 command steps
+	assert.Len(t, result.Steps, 6) // 3 command + 3 result steps
 }
 
 func TestRun_SandboxNonZeroExitIncludedInOutput(t *testing.T) {
@@ -172,7 +173,7 @@ func TestRun_SandboxNonZeroExitIncludedInOutput(t *testing.T) {
 	runner := &mockRunner{response: RunResponse{Stderr: "error msg", ExitCode: 1}}
 	result, err := Run(context.Background(), newCfg(model, runner), nil, "run", Callbacks{})
 	require.NoError(t, err)
-	assert.Equal(t, StepRoleUser, result.Steps[1].Role)
+	assert.Equal(t, StepRoleResult, result.Steps[1].Role)
 	assert.True(t, strings.HasPrefix(result.Steps[1].Content, "! "))
 	assert.Contains(t, result.Steps[1].Content, "(exit code: 1)")
 	assert.Contains(t, result.Steps[1].Content, "error msg")
@@ -264,14 +265,15 @@ func TestRun_XMLRetry_RecoversToCommand(t *testing.T) { //nolint:dupl
 	assert.Equal(t, "rg foo /path", runner.calls[0].Command)
 	assert.Equal(t, []string{"xml_tool_call"}, retryCalls)
 
-	// Steps: directive (user), ! rg response (assistant), command output (user), final (assistant)
+	// Steps: directive (result), ! rg turn (command), result (result), final (assistant)
 	// XML assistant turn is NOT in Steps.
 	assert.Len(t, result.Steps, 4)
-	assert.Equal(t, StepRoleUser, result.Steps[0].Role)
+	assert.Equal(t, StepRoleResult, result.Steps[0].Role)
 	assert.Contains(t, result.Steps[0].Content, "Your previous output was not processed")
 	assert.NotContains(t, result.Steps[0].Content, "<invoke")
-	assert.Equal(t, StepRoleAssistant, result.Steps[1].Role)
+	assert.Equal(t, StepRoleCommand, result.Steps[1].Role)
 	assert.True(t, strings.HasPrefix(result.Steps[2].Content, "! ")) // command output
+	assert.Equal(t, StepRoleResult, result.Steps[2].Role)
 	assert.Equal(t, StepRoleAssistant, result.Steps[3].Role)
 	assert.Equal(t, "Found it.", result.Steps[3].Content)
 }
@@ -356,7 +358,7 @@ func TestRun_MultiCommand_ExitCodeFormatted(t *testing.T) {
 	result, err := Run(context.Background(), newCfg(model, runner), nil, "run", Callbacks{})
 	require.NoError(t, err)
 	cmdStep := result.Steps[1]
-	assert.Equal(t, StepRoleUser, cmdStep.Role)
+	assert.Equal(t, StepRoleResult, cmdStep.Role)
 	assert.Contains(t, cmdStep.Content, "(exit code: 1)")
 }
 
@@ -399,7 +401,7 @@ func TestRun_ConsecutiveCommands_SoftWarning(t *testing.T) {
 	require.NoError(t, err)
 	var warningCount int
 	for _, s := range result.Steps {
-		if s.Role == StepRoleUser && strings.Contains(s.Content, "without explaining") {
+		if s.Role == StepRoleResult && strings.Contains(s.Content, "without explaining") {
 			warningCount++
 		}
 	}
@@ -418,7 +420,7 @@ func TestRun_ConsecutiveCommands_TextResponseTerminatesLoop(t *testing.T) {
 	result, err := Run(context.Background(), newCfg(model, runner), nil, "go", Callbacks{})
 	require.NoError(t, err)
 	for _, s := range result.Steps {
-		if s.Role == StepRoleUser {
+		if s.Role == StepRoleResult {
 			assert.NotContains(t, s.Content, "without explaining",
 				"no soft warning — counter resets on text")
 		}

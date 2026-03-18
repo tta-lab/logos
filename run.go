@@ -15,8 +15,10 @@ import (
 type StepRole string
 
 const (
-	StepRoleAssistant StepRole = "assistant"
-	StepRoleUser      StepRole = "user"
+	StepRoleAssistant StepRole = "assistant" // LLM turn with no commands (final answer)
+	StepRoleUser      StepRole = "user"      // human input
+	StepRoleCommand   StepRole = "command"   // LLM turn that contains ! commands
+	StepRoleResult    StepRole = "result"    // command output fed back to LLM
 )
 
 // DefaultMaxSteps is the fallback max steps when Config.MaxSteps is 0.
@@ -150,22 +152,23 @@ func Run(
 				cbs.OnRetry("xml_tool_call", step)
 			}
 			// Only add directive to Steps — skip the XML assistant message entirely.
-			steps = append(steps, StepMessage{Role: StepRoleUser, Content: directive, Timestamp: time.Now()})
+			steps = append(steps, StepMessage{Role: StepRoleResult, Content: directive, Timestamp: time.Now()})
 			// Add both to messages: model needs to see its mistake + directive.
 			messages = append(messages, newAssistantMessage(fullText), fantasy.NewUserMessage(directive))
 			continue
 		}
 
 		preText, cmds := scanAllCommands(fullText)
-		steps = append(steps, StepMessage{Role: StepRoleAssistant, Content: fullText, Timestamp: time.Now().UTC()})
 
 		if len(cmds) == 0 {
 			// Final answer — return
+			steps = append(steps, StepMessage{Role: StepRoleAssistant, Content: fullText, Timestamp: time.Now().UTC()})
 			responseText.WriteString(fullText)
 			return &RunResult{Response: responseText.String(), Steps: steps}, nil
 		}
 
 		// Has commands — execute all sequentially
+		steps = append(steps, StepMessage{Role: StepRoleCommand, Content: fullText, Timestamp: time.Now().UTC()})
 		responseText.WriteString(preText)
 
 		consecutiveCmdTurns++
@@ -189,7 +192,7 @@ func Run(
 			)
 		}
 
-		steps = append(steps, StepMessage{Role: StepRoleUser, Content: userContent, Timestamp: time.Now().UTC()})
+		steps = append(steps, StepMessage{Role: StepRoleResult, Content: userContent, Timestamp: time.Now().UTC()})
 		messages = append(messages, newAssistantMessage(fullText), fantasy.NewUserMessage(userContent))
 	}
 
