@@ -142,17 +142,17 @@ func Run(
 		steps = append(steps, StepMessage{Role: StepRoleAssistant, Content: fullText, Timestamp: time.Now().UTC()})
 
 		if !found {
-			if ContainsXMLToolCall(fullText) && xmlRetries < MaxXMLRetries {
-				xmlRetries++
-				feedback := "Error: You used XML/structured tool_call format. This is not supported.\n" +
-					"Use $ command format instead. Example: $ rg 'pattern' /path\n" +
-					"Do NOT use <invoke>, <tool_call>, or XML tags. One command per $ line."
-				steps = append(steps, StepMessage{Role: StepRoleCommand, Content: feedback, Timestamp: time.Now().UTC()})
-				messages = append(messages, newAssistantMessage(fullText), fantasy.NewUserMessage(feedback))
-				step-- // don't count XML correction against step budget
-				continue
-			}
 			if ContainsXMLToolCall(fullText) {
+				if xmlRetries < MaxXMLRetries {
+					xmlRetries++
+					feedback := "Error: You used XML/structured tool_call format. This is not supported.\n" +
+						"Use $ command format instead. Example: $ rg 'pattern' /path\n" +
+						"Do NOT use <invoke>, <tool_call>, or XML tags. One command per $ line."
+					steps = append(steps, StepMessage{Role: StepRoleCommand, Content: feedback, Timestamp: time.Now().UTC()})
+					messages = append(messages, newAssistantMessage(fullText), fantasy.NewUserMessage(feedback))
+					step-- // don't count XML correction against step budget
+					continue
+				}
 				return &RunResult{Response: responseText.String(), Steps: steps},
 					fmt.Errorf("logos: model persisted XML tool_call format after %d correction attempts", MaxXMLRetries)
 			}
