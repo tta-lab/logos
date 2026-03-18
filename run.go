@@ -122,10 +122,11 @@ func Run(
 	messages = append(messages, fantasy.NewUserMessage(prompt))
 
 	var (
-		steps           []StepMessage
-		responseText    strings.Builder
-		xmlRetries      int
-		multiCmdRetries int // counts total multi-command violations across the session (intentional — not reset on success, mirrors xmlRetries)
+		steps        []StepMessage
+		responseText strings.Builder
+		xmlRetries   int
+		// multiCmdRetries counts total violations across the session (not reset on success — mirrors xmlRetries).
+		multiCmdRetries int
 	)
 
 	for step := 0; step < maxSteps; step++ {
