@@ -205,6 +205,7 @@ func TestRun_XMLRetry_RecoversToDollarCommand(t *testing.T) {
 	assert.Len(t, result.Steps, 5)
 	assert.Equal(t, StepRoleUser, result.Steps[1].Role) // feedback step
 	assert.Contains(t, result.Steps[1].Content, "XML/structured tool_call format")
+	assert.True(t, strings.HasPrefix(result.Steps[3].Content, "$ ")) // command output step
 }
 
 func TestRun_XMLRetry_ExhaustionReturnsError(t *testing.T) {
@@ -241,6 +242,7 @@ func TestRun_MultiCommand_RejectsAndRetries(t *testing.T) {
 	assert.Len(t, result.Steps, 5)
 	assert.Equal(t, StepRoleUser, result.Steps[1].Role)
 	assert.Contains(t, result.Steps[1].Content, "multiple $ commands")
+	assert.True(t, strings.HasPrefix(result.Steps[3].Content, "$ ")) // command output step
 }
 
 func TestRun_MultiCommand_RetryCapExhaustion(t *testing.T) {
