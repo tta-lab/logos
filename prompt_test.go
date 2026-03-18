@@ -86,8 +86,8 @@ func TestBuildSystemPrompt_NetworkAndReadFS(t *testing.T) {
 	assert.Contains(t, result, "### temenos search")
 	assert.Contains(t, result, "### rg")
 	// Inline examples show filesystem (ReadFS takes priority)
-	assert.Contains(t, result, "$ cat /path/to/file.go")
-	assert.Contains(t, result, "$ rg \"pattern\"")
+	assert.Contains(t, result, `$ rg "pattern" /path`)
+	assert.Contains(t, result, "$ sed -n '10,50p' /path/to/file.go | cat -n")
 	// ReadFS rule present
 	assert.Contains(t, result, "Check file size with `wc -l`")
 }
@@ -122,7 +122,7 @@ func TestBuildSystemPrompt_ReadFSOnly(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Contains(t, result, "### rg")
-	assert.Contains(t, result, "$ cat /path/to/file.go")
+	assert.Contains(t, result, `$ rg "pattern" /path`)
 	assert.NotContains(t, result, "### temenos read-url")
 	// ReadFS rule present
 	assert.Contains(t, result, "Check file size with `wc -l`")

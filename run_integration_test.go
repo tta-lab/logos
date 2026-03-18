@@ -240,6 +240,24 @@ func TestRun_MultiCommand_RejectsAndRetries(t *testing.T) {
 	assert.Contains(t, result.Steps[1].Content, "multiple $ commands")
 }
 
+func TestRun_MultiCommand_RetryCapExhaustion(t *testing.T) {
+	// Model always outputs multi-command turns — retry cap should trigger after MaxMultiCmdRetries.
+	// MaxMultiCmdRetries+1 calls are made: MaxMultiCmdRetries corrections + 1 that fires the cap.
+	responses := make([]string, MaxMultiCmdRetries+1)
+	for i := range responses {
+		responses[i] = "$ cmd1\n$ cmd2"
+	}
+	model := &mockLanguageModel{responses: responses}
+	runner := &mockRunner{}
+	result, err := Run(context.Background(), newCfg(model, runner), nil, "go", Callbacks{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "multi-command")
+	assert.Contains(t, err.Error(), fmt.Sprintf("%d", MaxMultiCmdRetries))
+	assert.Equal(t, MaxMultiCmdRetries+1, model.call) // exactly MaxMultiCmdRetries corrections + 1 cap trigger
+	assert.Empty(t, runner.calls)                     // runner never called
+	assert.NotNil(t, result)                          // result returned for observability
+}
+
 func TestRun_MultiCommand_ExhaustionHitsMaxSteps(t *testing.T) {
 	// Multi-command rejection (not counted) then real commands exhaust step budget.
 	responses := make([]string, 20)

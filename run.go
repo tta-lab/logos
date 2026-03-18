@@ -29,6 +29,10 @@ const DefaultMaxTokens = 16384
 // when a model outputs XML tool_call format instead of $ commands.
 const MaxXMLRetries = 2
 
+// MaxMultiCmdRetries is the number of times the loop will inject error feedback
+// when a model outputs multiple $ commands in one turn.
+const MaxMultiCmdRetries = 3
+
 // Re-exported from temenos/client so consumers don't import temenos directly.
 type (
 	// AllowedPath specifies a filesystem path allowed in the sandbox.
@@ -121,6 +125,8 @@ func Run(
 		steps        []StepMessage
 		responseText strings.Builder
 		xmlRetries   int
+		// multiCmdRetries counts total violations across the session (not reset on success — mirrors xmlRetries).
+		multiCmdRetries int
 	)
 
 	for step := 0; step < maxSteps; step++ {
@@ -137,17 +143,17 @@ func Run(
 		steps = append(steps, StepMessage{Role: StepRoleAssistant, Content: fullText, Timestamp: time.Now().UTC()})
 
 		if !found {
-			if ContainsXMLToolCall(fullText) && xmlRetries < MaxXMLRetries {
-				xmlRetries++
-				feedback := "Error: You used XML/structured tool_call format. This is not supported.\n" +
-					"Use $ command format instead. Example: $ rg 'pattern' /path\n" +
-					"Do NOT use <invoke>, <tool_call>, or XML tags. One command per $ line."
-				steps = append(steps, StepMessage{Role: StepRoleCommand, Content: feedback, Timestamp: time.Now().UTC()})
-				messages = append(messages, newAssistantMessage(fullText), fantasy.NewUserMessage(feedback))
-				step-- // don't count XML correction against step budget
-				continue
-			}
 			if ContainsXMLToolCall(fullText) {
+				if xmlRetries < MaxXMLRetries {
+					xmlRetries++
+					feedback := "Error: You used XML/structured tool_call format. This is not supported.\n" +
+						"Use $ command format instead. Example: $ rg 'pattern' /path\n" +
+						"Do NOT use <invoke>, <tool_call>, or XML tags. One command per $ line."
+					steps = append(steps, StepMessage{Role: StepRoleCommand, Content: feedback, Timestamp: time.Now().UTC()})
+					messages = append(messages, newAssistantMessage(fullText), fantasy.NewUserMessage(feedback))
+					step-- // don't count XML correction against step budget
+					continue
+				}
 				return &RunResult{Response: responseText.String(), Steps: steps},
 					fmt.Errorf("logos: model persisted XML tool_call format after %d correction attempts", MaxXMLRetries)
 			}
@@ -157,6 +163,11 @@ func Run(
 
 		// Reject multi-command turns — tell the model to run one at a time.
 		if countCommands(fullText) > 1 {
+			if multiCmdRetries >= MaxMultiCmdRetries {
+				return &RunResult{Response: responseText.String(), Steps: steps},
+					fmt.Errorf("logos: model persisted multi-command output after %d correction attempts", MaxMultiCmdRetries)
+			}
+			multiCmdRetries++
 			feedback := "Error: You wrote multiple $ commands in one message. " +
 				"Only one command per message is supported.\n" +
 				"Run one command, wait for its output, then run the next."
