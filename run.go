@@ -16,7 +16,7 @@ type StepRole string
 
 const (
 	StepRoleAssistant StepRole = "assistant" // LLM turn with no commands (final answer)
-	StepRoleUser      StepRole = "user"      // injected directives (e.g. XML retry)
+	StepRoleUser      StepRole = "user"      // human input
 	StepRoleCommand   StepRole = "command"   // LLM turn that contains ! commands
 	StepRoleResult    StepRole = "result"    // command output fed back to LLM
 )
@@ -152,7 +152,7 @@ func Run(
 				cbs.OnRetry("xml_tool_call", step)
 			}
 			// Only add directive to Steps — skip the XML assistant message entirely.
-			steps = append(steps, StepMessage{Role: StepRoleUser, Content: directive, Timestamp: time.Now()})
+			steps = append(steps, StepMessage{Role: StepRoleResult, Content: directive, Timestamp: time.Now()})
 			// Add both to messages: model needs to see its mistake + directive.
 			messages = append(messages, newAssistantMessage(fullText), fantasy.NewUserMessage(directive))
 			continue

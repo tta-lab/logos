@@ -268,7 +268,7 @@ func TestRun_XMLRetry_RecoversToCommand(t *testing.T) { //nolint:dupl
 	// Steps: directive (user), ! rg turn (command), result (result), final (assistant)
 	// XML assistant turn is NOT in Steps.
 	assert.Len(t, result.Steps, 4)
-	assert.Equal(t, StepRoleUser, result.Steps[0].Role)
+	assert.Equal(t, StepRoleResult, result.Steps[0].Role)
 	assert.Contains(t, result.Steps[0].Content, "Your previous output was not processed")
 	assert.NotContains(t, result.Steps[0].Content, "<invoke")
 	assert.Equal(t, StepRoleCommand, result.Steps[1].Role)
