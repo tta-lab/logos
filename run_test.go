@@ -130,31 +130,38 @@ func TestScanForCommand(t *testing.T) {
 	}
 }
 
-func TestCountCommands(t *testing.T) {
+func TestScanAllCommands(t *testing.T) {
 	tests := []struct {
-		name string
-		text string
-		want int
+		name     string
+		text     string
+		wantPre  string
+		wantCmds []string
 	}{
-		// Basic counting
-		{"no commands", "Just some text.", 0},
-		{"one command", "$ ls -la", 1},
-		{"two commands", "$ pwd\n$ ls -la", 2},
-		{"three commands", "$ pwd\n$ ls\n$ cat file.go", 3},
-		{"command with text", "Let me check.\n$ ls -la", 1},
-		{"text between commands", "$ pwd\nsome text\n$ ls -la", 2},
-		{"empty", "", 0},
-		// Heredoc-aware counting
-		{"heredoc with dollar in body", "$ cat <<'EOF'\n$ not_a_command\nEOF", 1},
-		{"heredoc then real command", "$ cat <<'EOF'\nbody\nEOF\n$ ls", 2},
-		{"dash heredoc with dollar in body", "$ cat <<-'EOF'\n\t$ fake\nEOF", 1},
-		{"unclosed heredoc then command", "$ cat <<'EOF'\nno close\n$ ls", 2},
+		{"no commands", "Just text.", "Just text.", nil},
+		{"one command", "$ ls -la", "", []string{"ls -la"}},
+		{"two commands", "$ pwd\n$ ls -la", "", []string{"pwd", "ls -la"}},
+		{"text before commands", "Let me check.\n$ pwd\n$ ls", "Let me check.\n", []string{"pwd", "ls"}},
+		{"heredoc counts as one", "$ cat <<'EOF'\nline1\nEOF\n$ ls", "", []string{"cat <<'EOF'\nline1\nEOF", "ls"}},
+		{"dollar in heredoc body ignored", "$ cat <<'EOF'\n$ fake\nEOF", "", []string{"cat <<'EOF'\n$ fake\nEOF"}},
 	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := countCommands(tt.text); got != tt.want {
-				t.Errorf("countCommands() = %d, want %d", got, tt.want)
+			preText, cmds := scanAllCommands(tt.text)
+			if preText != tt.wantPre {
+				t.Errorf("preText = %q, want %q", preText, tt.wantPre)
+			}
+			var gotArgs []string
+			for _, c := range cmds {
+				gotArgs = append(gotArgs, c.Args)
+			}
+			if len(gotArgs) != len(tt.wantCmds) {
+				t.Errorf("got %d commands, want %d: %v", len(gotArgs), len(tt.wantCmds), gotArgs)
+				return
+			}
+			for i := range gotArgs {
+				if gotArgs[i] != tt.wantCmds[i] {
+					t.Errorf("cmd[%d] = %q, want %q", i, gotArgs[i], tt.wantCmds[i])
+				}
 			}
 		})
 	}

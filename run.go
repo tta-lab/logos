@@ -29,9 +29,13 @@ const DefaultMaxTokens = 16384
 // when a model outputs XML tool_call format instead of $ commands.
 const MaxXMLRetries = 2
 
-// MaxMultiCmdRetries is the number of times the loop will inject error feedback
-// when a model outputs multiple $ commands in one turn.
-const MaxMultiCmdRetries = 10
+// SoftWarningThreshold is the number of consecutive command-only turns
+// before the loop injects a nudge asking the agent to explain progress.
+const SoftWarningThreshold = 10
+
+// HardExitThreshold is the number of consecutive command-only turns
+// that triggers a hard exit — the agent is in a degenerate loop.
+const HardExitThreshold = 20
 
 // Re-exported from temenos/client so consumers don't import temenos directly.
 type (
@@ -127,11 +131,10 @@ func Run(
 	messages = append(messages, fantasy.NewUserMessage(prompt))
 
 	var (
-		steps        []StepMessage
-		responseText strings.Builder
-		xmlRetries   int
-		// multiCmdRetries counts total violations across the session (not reset on success — mirrors xmlRetries).
-		multiCmdRetries int
+		steps               []StepMessage
+		responseText        strings.Builder
+		xmlRetries          int
+		consecutiveCmdTurns int // consecutive turns where agent ran commands without text-only response
 	)
 
 	for step := 0; step < maxSteps; step++ {
@@ -144,16 +147,16 @@ func Run(
 			return nil, fmt.Errorf("stream turn %d: %w", step, streamErr)
 		}
 
-		preText, cmd, found := scanForCommand(fullText)
+		preText, cmds := scanAllCommands(fullText)
 		steps = append(steps, StepMessage{Role: StepRoleAssistant, Content: fullText, Timestamp: time.Now().UTC()})
 
-		if !found {
+		if len(cmds) == 0 {
 			if ContainsXMLToolCall(fullText) {
 				if xmlRetries < MaxXMLRetries {
 					xmlRetries++
 					feedback := "Error: You used XML/structured tool_call format. This is not supported.\n" +
 						"Use $ command format instead. Example: $ rg 'pattern' /path\n" +
-						"Do NOT use <invoke>, <tool_call>, or XML tags. One command per $ line."
+						"Do NOT use <invoke>, <tool_call>, or XML tags."
 					steps = append(steps, StepMessage{Role: StepRoleUser, Content: feedback, Timestamp: time.Now().UTC()})
 					messages = append(messages, newAssistantMessage(fullText), fantasy.NewUserMessage(feedback))
 					step-- // don't count XML correction against step budget
@@ -162,36 +165,37 @@ func Run(
 				return &RunResult{Response: responseText.String(), Steps: steps},
 					fmt.Errorf("logos: model persisted XML tool_call format after %d correction attempts", MaxXMLRetries)
 			}
+			// Final answer — return
 			responseText.WriteString(fullText)
 			return &RunResult{Response: responseText.String(), Steps: steps}, nil
 		}
 
-		// Reject multi-command turns — tell the model to run one at a time.
-		if countCommands(fullText) > 1 {
-			if multiCmdRetries >= MaxMultiCmdRetries {
-				return &RunResult{Response: responseText.String(), Steps: steps},
-					fmt.Errorf("logos: model persisted multi-command output after %d correction attempts", MaxMultiCmdRetries)
-			}
-			multiCmdRetries++
-			feedback := "Error: You wrote multiple $ commands in one message. " +
-				"Only one command per message is supported.\n" +
-				"Run one command, wait for its output, then run the next."
-			steps = append(steps, StepMessage{Role: StepRoleUser, Content: feedback, Timestamp: time.Now().UTC()})
-			messages = append(messages, newAssistantMessage(fullText), fantasy.NewUserMessage(feedback))
-			step-- // don't count multi-command correction against step budget
-			continue
-		}
-
+		// Has commands — execute all sequentially
 		responseText.WriteString(preText)
-		if cbs.OnCommandStart != nil {
-			cbs.OnCommandStart(cmd.Args)
+		consecutiveCmdTurns++
+
+		// Hard exit check — BEFORE executing commands (don't waste cycles on a degenerate turn)
+		if consecutiveCmdTurns >= HardExitThreshold {
+			return &RunResult{Response: responseText.String(), Steps: steps},
+				fmt.Errorf("logos: %d consecutive command turns without a text response", consecutiveCmdTurns)
 		}
 
-		rawOutput, exitCode := runAndNotify(ctx, cfg, cbs, cmd.Args)
-		userContent := "$ " + cmd.Args + "\n" + formatForLLM(rawOutput, exitCode)
+		// Execute each command via runAndNotify (fires OnCommandResult callback),
+		// then format output for LLM with exit code suffix.
+		userContent := strings.Join(executeCommands(ctx, cfg, cbs, cmds), "\n")
 		steps = append(steps, StepMessage{Role: StepRoleUser, Content: userContent, Timestamp: time.Now().UTC()})
-
 		messages = append(messages, newAssistantMessage(fullText), fantasy.NewUserMessage(userContent))
+
+		// Soft warning — inject after command output
+		if consecutiveCmdTurns == SoftWarningThreshold {
+			nudge := fmt.Sprintf(
+				"Note: You have run %d command turns without explaining your progress. "+
+					"Include a brief summary of what you've found before your next command.",
+				consecutiveCmdTurns,
+			)
+			steps = append(steps, StepMessage{Role: StepRoleUser, Content: nudge, Timestamp: time.Now().UTC()})
+			messages = append(messages, fantasy.NewUserMessage(nudge))
+		}
 	}
 
 	return &RunResult{
@@ -208,6 +212,20 @@ func runAndNotify(ctx context.Context, cfg Config, cbs Callbacks, args string) (
 		cbs.OnCommandResult(args, rawOutput, exitCode)
 	}
 	return rawOutput, exitCode
+}
+
+// executeCommands runs each command sequentially, firing OnCommandStart per command,
+// and returns formatted output parts ready for joining into a user message.
+func executeCommands(ctx context.Context, cfg Config, cbs Callbacks, cmds []Command) []string {
+	outputParts := make([]string, 0, len(cmds))
+	for _, cmd := range cmds {
+		if cbs.OnCommandStart != nil {
+			cbs.OnCommandStart(cmd.Args)
+		}
+		rawOutput, exitCode := runAndNotify(ctx, cfg, cbs, cmd.Args)
+		outputParts = append(outputParts, "$ "+cmd.Args+"\n"+formatForLLM(rawOutput, exitCode))
+	}
+	return outputParts
 }
 
 // formatForLLM formats command output for the LLM message.
@@ -285,16 +303,16 @@ func scanForCommand(text string) (preText string, cmd Command, found bool) {
 	return text, Command{}, false
 }
 
-// countCommands returns the number of $ command lines in text,
-// skipping $ lines that appear inside heredoc bodies.
-func countCommands(text string) int {
-	count := 0
+// scanAllCommands extracts all $ commands from text, in order.
+// Returns the text before the first command and a slice of commands.
+// Heredoc bodies are captured as part of their parent command (not split).
+func scanAllCommands(text string) (preText string, cmds []Command) {
 	lines := strings.Split(text, "\n")
-	var heredocDelim string // non-empty when inside a heredoc body
+	var heredocDelim string
+	firstCmdIdx := -1
 
 	for i, line := range lines {
 		if heredocDelim != "" {
-			// Inside heredoc body — check for closing delimiter
 			if isHeredocClose(line, heredocDelim) {
 				heredocDelim = ""
 			}
@@ -305,20 +323,35 @@ func countCommands(text string) int {
 		if !ok {
 			continue
 		}
-		count++
 
-		// Check if this command starts a heredoc
-		if delim, has := heredocDelimiter(c.Args); has {
-			// Only skip heredoc body if closing delimiter exists in remaining lines
-			for _, remaining := range lines[i+1:] {
-				if isHeredocClose(remaining, delim) {
+		if firstCmdIdx == -1 {
+			firstCmdIdx = i
+		}
+
+		// Check for heredoc — capture through closing delimiter
+		if delim, hasHeredoc := heredocDelimiter(c.Args); hasHeredoc {
+			for j := i + 1; j < len(lines); j++ {
+				if isHeredocClose(lines[j], delim) {
+					fullBlock := strings.Join(lines[i:j+1], "\n")
+					c.Args = strings.TrimPrefix(strings.TrimSpace(fullBlock), "$ ")
+					c.Raw = fullBlock
 					heredocDelim = delim
 					break
 				}
 			}
 		}
+
+		cmds = append(cmds, c)
 	}
-	return count
+
+	if firstCmdIdx == -1 {
+		return text, nil
+	}
+	preText = strings.Join(lines[:firstCmdIdx], "\n")
+	if preText != "" {
+		preText += "\n"
+	}
+	return preText, cmds
 }
 
 // streamOneTurn streams a single LLM response (no tools).
