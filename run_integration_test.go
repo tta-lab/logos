@@ -265,7 +265,7 @@ func TestRun_XMLRetry_RecoversToCommand(t *testing.T) { //nolint:dupl
 	assert.Equal(t, "rg foo /path", runner.calls[0].Command)
 	assert.Equal(t, []string{"xml_tool_call"}, retryCalls)
 
-	// Steps: directive (user), ! rg turn (command), result (result), final (assistant)
+	// Steps: directive (result), ! rg turn (command), result (result), final (assistant)
 	// XML assistant turn is NOT in Steps.
 	assert.Len(t, result.Steps, 4)
 	assert.Equal(t, StepRoleResult, result.Steps[0].Role)
