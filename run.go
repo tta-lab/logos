@@ -85,6 +85,8 @@ type Callbacks struct {
 	OnCommandStart func(command string)
 	// OnCommandResult is called after a command executes with the command string,
 	// raw combined stdout+stderr output (no exit code suffix), and the exit code.
+	// exitCode is -1 if the sandbox itself failed to execute the command (temenos
+	// transport error), in which case output contains the error description.
 	OnCommandResult func(command string, output string, exitCode int)
 }
 
@@ -185,7 +187,8 @@ func Run(
 			cbs.OnCommandStart(cmd.Args)
 		}
 
-		userContent := "$ " + cmd.Args + "\n" + runAndNotify(ctx, cfg, cbs, cmd.Args)
+		rawOutput, exitCode := runAndNotify(ctx, cfg, cbs, cmd.Args)
+		userContent := "$ " + cmd.Args + "\n" + formatForLLM(rawOutput, exitCode)
 		steps = append(steps, StepMessage{Role: StepRoleUser, Content: userContent, Timestamp: time.Now().UTC()})
 
 		messages = append(messages, newAssistantMessage(fullText), fantasy.NewUserMessage(userContent))
@@ -197,14 +200,21 @@ func Run(
 	}, fmt.Errorf("logos: max steps (%d) reached", maxSteps)
 }
 
-// runAndNotify executes a command, fires OnCommandResult, and returns the
-// LLM-formatted output string (with exit code suffix appended for non-zero exits).
-func runAndNotify(ctx context.Context, cfg Config, cbs Callbacks, args string) string {
+// runAndNotify executes a command and fires OnCommandResult.
+// Returns raw output and exit code; callers format for LLM separately.
+func runAndNotify(ctx context.Context, cfg Config, cbs Callbacks, args string) (string, int) {
 	rawOutput, exitCode := execCommand(ctx, cfg.Temenos, args, cfg.SandboxEnv, cfg.AllowedPaths)
 	if cbs.OnCommandResult != nil {
 		cbs.OnCommandResult(args, rawOutput, exitCode)
 	}
-	if exitCode != 0 {
+	return rawOutput, exitCode
+}
+
+// formatForLLM formats command output for the LLM message.
+// Appends exit code suffix for non-zero exits; skips it for exitCode -1 (transport
+// error) since rawOutput already contains the error description.
+func formatForLLM(rawOutput string, exitCode int) string {
+	if exitCode != 0 && exitCode != -1 {
 		return rawOutput + fmt.Sprintf("\n(exit code: %d)", exitCode)
 	}
 	return rawOutput
@@ -224,7 +234,7 @@ func execCommand(
 		AllowedPaths: paths,
 	})
 	if err != nil {
-		slog.Warn("temenos exec failure", "args", args, "error", err)
+		slog.Error("temenos exec failure", "args", args, "error", err)
 		return fmt.Sprintf("execution error: %v", err), -1
 	}
 

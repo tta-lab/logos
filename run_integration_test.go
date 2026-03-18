@@ -226,6 +226,23 @@ func TestRun_OnCommandResultCallback_NonZeroExit(t *testing.T) {
 	assert.Contains(t, result.Steps[1].Content, "(exit code: 1)")
 }
 
+func TestRun_OnCommandResultCallback_TransportError(t *testing.T) {
+	model := &mockLanguageModel{responses: []string{"$ ls", "done"}}
+	runner := &mockRunner{err: fmt.Errorf("socket closed")}
+	var callbackOutput string
+	var callbackExitCode int
+	cbs := Callbacks{
+		OnCommandResult: func(cmd, output string, exitCode int) {
+			callbackOutput = output
+			callbackExitCode = exitCode
+		},
+	}
+	_, err := Run(context.Background(), newCfg(model, runner), nil, "q", cbs)
+	require.NoError(t, err) // transport failure is surfaced to LLM, not as Run() error
+	assert.Equal(t, -1, callbackExitCode)
+	assert.Contains(t, callbackOutput, "execution error:")
+}
+
 func TestRun_XMLRetry_RecoversToDollarCommand(t *testing.T) { //nolint:dupl
 	// Turn 1: model outputs XML. Turn 2: model corrects to $ command. Turn 3: done.
 	model := &mockLanguageModel{responses: []string{
