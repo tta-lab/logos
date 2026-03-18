@@ -2,21 +2,24 @@ package logos
 
 import "strings"
 
-// Command represents a parsed $ command from assistant output.
+// CommandPrefix is the prefix for agent commands in LLM output.
+const CommandPrefix = "! "
+
+// Command represents a parsed ! command from assistant output.
 type Command struct {
-	Raw  string // full original line (e.g. "$ ls -la")
-	Args string // everything after "$ " (e.g. "ls -la")
+	Raw  string // full original line (e.g. "! ls -la")
+	Args string // everything after "! " (e.g. "ls -la")
 }
 
-// ParseCommand checks if a line is a $ command.
-// Returns the command and true if the line starts with "$ ".
+// ParseCommand checks if a line is a ! command.
+// Returns the command and true if the line starts with "! ".
 // Returns zero Command and false otherwise.
 func ParseCommand(line string) (Command, bool) {
 	trimmed := strings.TrimSpace(line)
-	if !strings.HasPrefix(trimmed, "$ ") {
+	if !strings.HasPrefix(trimmed, CommandPrefix) {
 		return Command{}, false
 	}
-	args := strings.TrimPrefix(trimmed, "$ ")
+	args := strings.TrimPrefix(trimmed, CommandPrefix)
 	if args == "" {
 		return Command{}, false
 	}
@@ -74,7 +77,7 @@ func heredocDelimiter(cmdArgs string) (string, bool) {
 
 // ContainsXMLToolCall returns true if text contains XML tool_call patterns
 // produced by models that default to structured format (e.g. minimax).
-// Used to detect wrong output format and trigger error feedback.
+// Standalone utility — internal detection is handled by streamFilter during streaming.
 func ContainsXMLToolCall(text string) bool {
 	for _, marker := range xmlToolCallMarkers {
 		if strings.Contains(text, marker) {
@@ -88,7 +91,20 @@ func ContainsXMLToolCall(text string) bool {
 // format. Only includes patterns specific enough to avoid false positives
 // on prose mentioning XML concepts.
 var xmlToolCallMarkers = []string{
-	"<invoke name=",
 	"<tool_call>",
+	"</tool_call>",
+	"<tool_call ",
 	"<minimax:tool_call>",
+	"</minimax:tool_call>",
+	"<minimax:tool_call ",
+	"<invoke name=",
+	"<function_call>",
+	"<function_call ",
+}
+
+// stripMarkers are substrings to silently strip from streaming output.
+// Used to remove thinking tag leaks without triggering a retry.
+var stripMarkers = []string{
+	"</think>",
+	"<think>",
 }

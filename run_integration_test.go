@@ -132,7 +132,7 @@ func TestRun_NoCommand_ReturnsImmediately(t *testing.T) {
 
 func TestRun_OneCommandThenDone(t *testing.T) {
 	model := &mockLanguageModel{responses: []string{
-		"Let me check.\n$ ls -la",
+		"Let me check.\n! ls -la",
 		"The files are: main.go",
 	}}
 	runner := &mockRunner{response: RunResponse{Stdout: "main.go\ngo.mod"}}
@@ -142,7 +142,7 @@ func TestRun_OneCommandThenDone(t *testing.T) {
 	assert.Contains(t, result.Response, "The files are: main.go")
 	assert.Len(t, result.Steps, 3) // assistant, command, assistant
 	assert.Equal(t, StepRoleUser, result.Steps[1].Role)
-	assert.True(t, strings.HasPrefix(result.Steps[1].Content, "$ "))
+	assert.True(t, strings.HasPrefix(result.Steps[1].Content, "! "))
 	require.Len(t, runner.calls, 1)
 	assert.Equal(t, "ls -la", runner.calls[0].Command) // exact command forwarded unchanged
 }
@@ -151,7 +151,7 @@ func TestRun_MaxStepsExhausted(t *testing.T) {
 	// Each LLM response contains a command, so loop never terminates naturally.
 	responses := make([]string, 35)
 	for i := range responses {
-		responses[i] = "$ echo loop"
+		responses[i] = "! echo loop"
 	}
 	model := &mockLanguageModel{responses: responses}
 	runner := &mockRunner{response: RunResponse{Stdout: "loop"}}
@@ -166,20 +166,20 @@ func TestRun_MaxStepsExhausted(t *testing.T) {
 
 func TestRun_SandboxNonZeroExitIncludedInOutput(t *testing.T) {
 	model := &mockLanguageModel{responses: []string{
-		"$ false",
+		"! false",
 		"got it",
 	}}
 	runner := &mockRunner{response: RunResponse{Stderr: "error msg", ExitCode: 1}}
 	result, err := Run(context.Background(), newCfg(model, runner), nil, "run", Callbacks{})
 	require.NoError(t, err)
 	assert.Equal(t, StepRoleUser, result.Steps[1].Role)
-	assert.True(t, strings.HasPrefix(result.Steps[1].Content, "$ "))
+	assert.True(t, strings.HasPrefix(result.Steps[1].Content, "! "))
 	assert.Contains(t, result.Steps[1].Content, "(exit code: 1)")
 	assert.Contains(t, result.Steps[1].Content, "error msg")
 }
 
 func TestRun_OnCommandStartCallback(t *testing.T) {
-	model := &mockLanguageModel{responses: []string{"$ ls", "done"}}
+	model := &mockLanguageModel{responses: []string{"! ls", "done"}}
 	runner := &mockRunner{response: RunResponse{Stdout: "file.go"}}
 	var called []string
 	cbs := Callbacks{OnCommandStart: func(cmd string) { called = append(called, cmd) }}
@@ -189,7 +189,7 @@ func TestRun_OnCommandStartCallback(t *testing.T) {
 }
 
 func TestRun_OnCommandResultCallback(t *testing.T) {
-	model := &mockLanguageModel{responses: []string{"$ echo hello", "done"}}
+	model := &mockLanguageModel{responses: []string{"! echo hello", "done"}}
 	runner := &mockRunner{response: RunResponse{Stdout: "hello", ExitCode: 0}}
 	var events []string
 	cbs := Callbacks{
@@ -206,7 +206,7 @@ func TestRun_OnCommandResultCallback(t *testing.T) {
 }
 
 func TestRun_OnCommandResultCallback_NonZeroExit(t *testing.T) {
-	model := &mockLanguageModel{responses: []string{"$ false", "done"}}
+	model := &mockLanguageModel{responses: []string{"! false", "done"}}
 	runner := &mockRunner{response: RunResponse{Stderr: "err msg", ExitCode: 1}}
 	var resultOutput string
 	var resultExitCode int
@@ -227,7 +227,7 @@ func TestRun_OnCommandResultCallback_NonZeroExit(t *testing.T) {
 }
 
 func TestRun_OnCommandResultCallback_TransportError(t *testing.T) {
-	model := &mockLanguageModel{responses: []string{"$ ls", "done"}}
+	model := &mockLanguageModel{responses: []string{"! ls", "done"}}
 	runner := &mockRunner{err: fmt.Errorf("socket closed")}
 	var callbackOutput string
 	var callbackExitCode int
@@ -243,45 +243,93 @@ func TestRun_OnCommandResultCallback_TransportError(t *testing.T) {
 	assert.Contains(t, callbackOutput, "execution error:")
 }
 
-func TestRun_XMLRetry_RecoversToDollarCommand(t *testing.T) { //nolint:dupl
-	// Turn 1: model outputs XML. Turn 2: model corrects to $ command. Turn 3: done.
+func TestRun_XMLRetry_RecoversToCommand(t *testing.T) { //nolint:dupl
+	// Turn 1: model outputs XML (detected by streaming filter). Turn 2: corrects to ! command. Turn 3: done.
 	model := &mockLanguageModel{responses: []string{
 		"<invoke name=\"rg\"><parameter name=\"pattern\">foo</parameter></invoke>",
-		"$ rg foo /path",
+		"! rg foo /path",
 		"Found it.",
 	}}
 	runner := &mockRunner{response: RunResponse{Stdout: "foo.go:1: foo"}}
-	result, err := Run(context.Background(), newCfg(model, runner), nil, "find foo", Callbacks{})
+
+	var retryCalls []string
+	cbs := Callbacks{
+		OnRetry: func(reason string, step int) { retryCalls = append(retryCalls, reason) },
+	}
+
+	result, err := Run(context.Background(), newCfg(model, runner), nil, "find foo", cbs)
 	require.NoError(t, err)
 	assert.Contains(t, result.Response, "Found it.")
 	require.Len(t, runner.calls, 1) // command executed exactly once after recovery
 	assert.Equal(t, "rg foo /path", runner.calls[0].Command)
-	// Steps: xml-assistant, feedback, dollar-assistant, command-output, final-assistant
-	assert.Len(t, result.Steps, 5)
-	assert.Equal(t, StepRoleUser, result.Steps[1].Role) // feedback step
-	assert.Contains(t, result.Steps[1].Content, "XML/structured tool_call format")
-	assert.True(t, strings.HasPrefix(result.Steps[3].Content, "$ ")) // command output step
+	assert.Equal(t, []string{"xml_tool_call"}, retryCalls)
+
+	// Steps: directive (user), ! rg response (assistant), command output (user), final (assistant)
+	// XML assistant turn is NOT in Steps.
+	assert.Len(t, result.Steps, 4)
+	assert.Equal(t, StepRoleUser, result.Steps[0].Role)
+	assert.Contains(t, result.Steps[0].Content, "Your previous output was not processed")
+	assert.NotContains(t, result.Steps[0].Content, "<invoke")
+	assert.Equal(t, StepRoleAssistant, result.Steps[1].Role)
+	assert.True(t, strings.HasPrefix(result.Steps[2].Content, "! ")) // command output
+	assert.Equal(t, StepRoleAssistant, result.Steps[3].Role)
+	assert.Equal(t, "Found it.", result.Steps[3].Content)
 }
 
-func TestRun_XMLRetry_ExhaustionReturnsError(t *testing.T) {
-	// All turns return XML — retries exhaust and we get an error.
+func TestRun_XMLRetry_ConsumesNormalSteps(t *testing.T) {
+	// Model always returns XML — each retry consumes a normal step, MaxSteps is the cap.
 	xmlResponse := "<minimax:tool_call><invoke name=\"rg\"></invoke></minimax:tool_call>"
-	responses := make([]string, MaxXMLRetries+2)
+	responses := make([]string, 10)
 	for i := range responses {
 		responses[i] = xmlResponse
 	}
 	model := &mockLanguageModel{responses: responses}
 	runner := &mockRunner{}
-	result, err := Run(context.Background(), newCfg(model, runner), nil, "find", Callbacks{})
+
+	var retryCalls []string
+	cbs := Callbacks{
+		OnRetry: func(reason string, step int) { retryCalls = append(retryCalls, reason) },
+	}
+
+	cfg := newCfg(model, runner)
+	cfg.MaxSteps = 3
+
+	result, err := Run(context.Background(), cfg, nil, "find", cbs)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "XML tool_call format")
-	assert.Empty(t, runner.calls) // runner never called
+	assert.Contains(t, err.Error(), "max steps")
+	assert.Empty(t, runner.calls) // runner never called — only XML responses
 	assert.NotNil(t, result)      // result returned for observability
+	assert.Len(t, retryCalls, 3)
+	for _, r := range retryCalls {
+		assert.Equal(t, "xml_tool_call", r)
+	}
+}
+
+func TestRun_XMLRetry_ThinkTagStripped(t *testing.T) {
+	// Model outputs think tags — tag strings are stripped, no retry triggered.
+	// Note: only the tag markers are removed from OnDelta; inter-tag content
+	// (e.g. "reasoning") passes through unchanged. Raw LLM output in Steps is unaffected.
+	model := &mockLanguageModel{responses: []string{
+		"<think>reasoning</think>Here is the result",
+	}}
+	runner := &mockRunner{}
+	var deltaOutput string
+	cbs := Callbacks{
+		OnDelta: func(text string) { deltaOutput += text },
+		OnRetry: func(reason string, step int) { panic("OnRetry should not be called") },
+	}
+	result, err := Run(context.Background(), newCfg(model, runner), nil, "q", cbs)
+	require.NoError(t, err)
+	// Full text in Steps still includes think tags (raw LLM output)
+	assert.Contains(t, result.Steps[0].Content, "<think>")
+	// OnDelta received text with tag markers stripped (not the inter-tag content)
+	assert.NotContains(t, deltaOutput, "<think>")
+	assert.Contains(t, deltaOutput, "Here is the result")
 }
 
 func TestRun_MultiCommand_ExecutesAll(t *testing.T) {
 	model := &mockLanguageModel{responses: []string{
-		"Let me check.\n$ pwd\n$ ls -la",
+		"Let me check.\n! pwd\n! ls -la",
 		"Found the files.",
 	}}
 	runner := &mockRunner{response: RunResponse{Stdout: "ok"}}
@@ -301,7 +349,7 @@ func TestRun_MultiCommand_ExecutesAll(t *testing.T) {
 
 func TestRun_MultiCommand_ExitCodeFormatted(t *testing.T) {
 	model := &mockLanguageModel{responses: []string{
-		"$ false\n$ echo ok",
+		"! false\n! echo ok",
 		"Got it.",
 	}}
 	runner := &mockRunner{response: RunResponse{Stderr: "error", ExitCode: 1}}
@@ -314,7 +362,7 @@ func TestRun_MultiCommand_ExitCodeFormatted(t *testing.T) {
 
 func TestRun_MultiCommand_WithHeredoc(t *testing.T) {
 	model := &mockLanguageModel{responses: []string{
-		"$ cat <<'EOF'\nhello\nEOF\n$ ls -la",
+		"! cat <<'EOF'\nhello\nEOF\n! ls -la",
 		"Done.",
 	}}
 	runner := &mockRunner{response: RunResponse{Stdout: "ok"}}
@@ -328,7 +376,7 @@ func TestRun_MultiCommand_WithHeredoc(t *testing.T) {
 
 func TestRun_MultiCommand_OnCommandStartPerCommand(t *testing.T) {
 	model := &mockLanguageModel{responses: []string{
-		"$ pwd\n$ ls\n$ echo hi",
+		"! pwd\n! ls\n! echo hi",
 		"All done.",
 	}}
 	runner := &mockRunner{response: RunResponse{Stdout: "ok"}}
@@ -342,7 +390,7 @@ func TestRun_MultiCommand_OnCommandStartPerCommand(t *testing.T) {
 func TestRun_ConsecutiveCommands_SoftWarning(t *testing.T) {
 	responses := make([]string, 12)
 	for i := 0; i < 11; i++ {
-		responses[i] = fmt.Sprintf("$ echo step%d", i)
+		responses[i] = fmt.Sprintf("! echo step%d", i)
 	}
 	responses[11] = "Done."
 	model := &mockLanguageModel{responses: responses}
@@ -360,9 +408,9 @@ func TestRun_ConsecutiveCommands_SoftWarning(t *testing.T) {
 
 func TestRun_ConsecutiveCommands_TextResponseTerminatesLoop(t *testing.T) {
 	responses := []string{
-		"$ echo 1", "$ echo 2", "$ echo 3", "$ echo 4", "$ echo 5",
+		"! echo 1", "! echo 2", "! echo 3", "! echo 4", "! echo 5",
 		"Halfway.",
-		"$ echo 6", "$ echo 7", "$ echo 8", "$ echo 9", "$ echo 10",
+		"! echo 6", "! echo 7", "! echo 8", "! echo 9", "! echo 10",
 		"Done.",
 	}
 	model := &mockLanguageModel{responses: responses}
@@ -377,27 +425,10 @@ func TestRun_ConsecutiveCommands_TextResponseTerminatesLoop(t *testing.T) {
 	}
 }
 
-func TestRun_ConsecutiveCommands_HardExit(t *testing.T) {
-	responses := make([]string, 25)
-	for i := range responses {
-		responses[i] = "$ echo loop"
-	}
-	model := &mockLanguageModel{responses: responses}
-	runner := &mockRunner{response: RunResponse{Stdout: "ok"}}
-	cfg := newCfg(model, runner)
-	cfg.MaxSteps = 50
-	_, err := Run(context.Background(), cfg, nil, "go", Callbacks{})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "consecutive command turns")
-	// Hard exit fires when the 20th command turn is attempted (consecutiveCmdTurns == 19 before check).
-	// Turns 0–18 execute (19 runner calls); turn 19 exits before execution.
-	assert.Len(t, runner.calls, 19)
-}
-
 func TestRun_HeredocCommand_FullBlockSentToRunner(t *testing.T) {
 	// Model issues a heredoc command — runner must receive the complete multi-line block.
 	model := &mockLanguageModel{responses: []string{
-		"$ cat <<'EOF'\nline1\nline2\nEOF",
+		"! cat <<'EOF'\nline1\nline2\nEOF",
 		"Created.",
 	}}
 	runner := &mockRunner{response: RunResponse{Stdout: "ok"}}
@@ -419,7 +450,7 @@ func TestRun_HttpServer_JsonEncodingRoundtrip(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(RunResponse{Stdout: "ok", ExitCode: 0}) //nolint:errcheck
 	})
-	model := &mockLanguageModel{responses: []string{"$ echo hi", "done"}}
+	model := &mockLanguageModel{responses: []string{"! echo hi", "done"}}
 	cfg := newCfg(model, tc)
 	_, err := Run(context.Background(), cfg, nil, "test", Callbacks{})
 	require.NoError(t, err)

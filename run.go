@@ -25,17 +25,9 @@ const DefaultMaxSteps = 30
 // DefaultMaxTokens is the fallback max output tokens when Config.MaxTokens is 0.
 const DefaultMaxTokens = 16384
 
-// MaxXMLRetries is the number of times the loop will inject error feedback
-// when a model outputs XML tool_call format instead of $ commands.
-const MaxXMLRetries = 2
-
 // SoftWarningThreshold is the number of consecutive command-only turns
 // before the loop injects a nudge asking the agent to explain progress.
 const SoftWarningThreshold = 10
-
-// HardExitThreshold is the number of consecutive command-only turns
-// that triggers a hard exit — the agent is in a degenerate loop.
-const HardExitThreshold = 20
 
 // Re-exported from temenos/client so consumers don't import temenos directly.
 type (
@@ -85,16 +77,19 @@ type RunResult struct {
 type Callbacks struct {
 	// OnDelta is called with each text delta as the LLM streams its response.
 	OnDelta func(text string)
-	// OnCommandStart is called when a $ command is detected, before execution.
+	// OnCommandStart is called when a ! command is detected, before execution.
 	OnCommandStart func(command string)
 	// OnCommandResult is called after a command executes with the command string,
 	// raw combined stdout+stderr output (no exit code suffix), and the exit code.
 	// exitCode is -1 if the sandbox itself failed to execute the command (temenos
 	// transport error), in which case output contains the error description.
 	OnCommandResult func(command string, output string, exitCode int)
+	// OnRetry is called when XML tool_call output is detected and a directive is
+	// injected. reason is "xml_tool_call". step is the current step number.
+	OnRetry func(reason string, step int)
 }
 
-// Run executes the agent loop: prompt → LLM → $ commands → repeat.
+// Run executes the agent loop: prompt → LLM → ! commands → repeat.
 // Stateless — the caller handles conversation persistence.
 func Run(
 	ctx context.Context,
@@ -133,12 +128,11 @@ func Run(
 	var (
 		steps               []StepMessage
 		responseText        strings.Builder
-		xmlRetries          int
 		consecutiveCmdTurns int // consecutive turns where agent ran commands without text-only response
 	)
 
 	for step := 0; step < maxSteps; step++ {
-		fullText, streamErr := streamOneTurn(ctx, model, messages, maxTokens, func(text string) {
+		fullText, xmlDetected, streamErr := streamOneTurn(ctx, model, messages, maxTokens, func(text string) {
 			if cbs.OnDelta != nil {
 				cbs.OnDelta(text)
 			}
@@ -147,24 +141,25 @@ func Run(
 			return nil, fmt.Errorf("stream turn %d: %w", step, streamErr)
 		}
 
+		// Check XML BEFORE appending to Steps — don't expose XML garbage to consumers.
+		if xmlDetected {
+			directive := "(Your previous output was not processed. " +
+				"To run a command, write a line starting with ! e.g. ! ls -la)"
+			slog.Warn("XML tool_call detected, injecting directive", "step", step)
+			if cbs.OnRetry != nil {
+				cbs.OnRetry("xml_tool_call", step)
+			}
+			// Only add directive to Steps — skip the XML assistant message entirely.
+			steps = append(steps, StepMessage{Role: StepRoleUser, Content: directive, Timestamp: time.Now()})
+			// Add both to messages: model needs to see its mistake + directive.
+			messages = append(messages, newAssistantMessage(fullText), fantasy.NewUserMessage(directive))
+			continue
+		}
+
 		preText, cmds := scanAllCommands(fullText)
 		steps = append(steps, StepMessage{Role: StepRoleAssistant, Content: fullText, Timestamp: time.Now().UTC()})
 
 		if len(cmds) == 0 {
-			if ContainsXMLToolCall(fullText) {
-				if xmlRetries < MaxXMLRetries {
-					xmlRetries++
-					feedback := "Error: You used XML/structured tool_call format. This is not supported.\n" +
-						"Use $ command format instead. Example: $ rg 'pattern' /path\n" +
-						"Do NOT use <invoke>, <tool_call>, or XML tags."
-					steps = append(steps, StepMessage{Role: StepRoleUser, Content: feedback, Timestamp: time.Now().UTC()})
-					messages = append(messages, newAssistantMessage(fullText), fantasy.NewUserMessage(feedback))
-					step-- // don't count XML correction against step budget
-					continue
-				}
-				return &RunResult{Response: responseText.String(), Steps: steps},
-					fmt.Errorf("logos: model persisted XML tool_call format after %d correction attempts", MaxXMLRetries)
-			}
 			// Final answer — return
 			responseText.WriteString(fullText)
 			return &RunResult{Response: responseText.String(), Steps: steps}, nil
@@ -173,12 +168,6 @@ func Run(
 		// Has commands — execute all sequentially
 		responseText.WriteString(preText)
 
-		// Hard exit check — BEFORE executing or incrementing (don't waste cycles on a degenerate turn).
-		// Report consecutiveCmdTurns+1 (the attempted turn count) to match HardExitThreshold.
-		if consecutiveCmdTurns+1 >= HardExitThreshold {
-			return &RunResult{Response: responseText.String(), Steps: steps},
-				fmt.Errorf("logos: %d consecutive command turns without a text response", consecutiveCmdTurns+1)
-		}
 		consecutiveCmdTurns++
 
 		// Execute each command via runAndNotify (fires OnCommandResult callback),
@@ -233,7 +222,7 @@ func executeCommands(ctx context.Context, cfg Config, cbs Callbacks, cmds []Comm
 			cbs.OnCommandStart(cmd.Args)
 		}
 		rawOutput, exitCode := runAndNotify(ctx, cfg, cbs, cmd.Args)
-		outputParts = append(outputParts, "$ "+cmd.Args+"\n"+formatForLLM(rawOutput, exitCode))
+		outputParts = append(outputParts, "! "+cmd.Args+"\n"+formatForLLM(rawOutput, exitCode))
 	}
 	return outputParts
 }
@@ -283,7 +272,7 @@ func captureHeredoc(lines []string, startIdx int, c Command, delim string) (Comm
 	for j := startIdx + 1; j < len(lines); j++ {
 		if isHeredocClose(lines[j], delim) {
 			fullBlock := strings.Join(lines[startIdx:j+1], "\n")
-			c.Args = strings.TrimPrefix(strings.TrimSpace(fullBlock), "$ ")
+			c.Args = strings.TrimPrefix(strings.TrimSpace(fullBlock), CommandPrefix)
 			c.Raw = fullBlock
 			return c, true
 		}
@@ -291,9 +280,9 @@ func captureHeredoc(lines []string, startIdx int, c Command, delim string) (Comm
 	return c, false
 }
 
-// scanForCommand finds the first $ command in text.
+// scanForCommand finds the first ! command in text.
 // If the command contains a heredoc (<<DELIM), captures lines through the
-// closing delimiter. Otherwise captures only the $ line.
+// closing delimiter. Otherwise captures only the ! line.
 // Returns text before the command, the command, and whether one was found.
 func scanForCommand(text string) (preText string, cmd Command, found bool) {
 	lines := strings.Split(text, "\n")
@@ -320,7 +309,7 @@ func scanForCommand(text string) (preText string, cmd Command, found bool) {
 	return text, Command{}, false
 }
 
-// scanAllCommands extracts all $ commands from text, in order.
+// scanAllCommands extracts all ! commands from text, in order.
 // Returns the text before the first command and a slice of commands.
 // Heredoc bodies are captured as part of their parent command (not split).
 // Unclosed heredocs fall back to single-line capture with a warning.
@@ -369,36 +358,145 @@ func scanAllCommands(text string) (preText string, cmds []Command) {
 	return preText, cmds
 }
 
+// streamFilter sits between the LLM stream and OnDelta, filtering XML tool_call
+// markers (suppress + retry) and strip markers like </think> (tag-only removal —
+// inter-tag content is passed through unchanged).
+type streamFilter struct {
+	delegate    func(string)
+	buf         strings.Builder
+	buffering   bool
+	xmlDetected bool
+}
+
+// Write processes a streaming delta. Fast path: no '<' → pass through immediately.
+// Otherwise buffers from the first '<' and checks for known markers.
+func (f *streamFilter) Write(delta string) {
+	if f.xmlDetected {
+		return
+	}
+	if !f.buffering {
+		idx := strings.IndexByte(delta, '<')
+		if idx == -1 {
+			f.delegate(delta)
+			return
+		}
+		if idx > 0 {
+			f.delegate(delta[:idx])
+		}
+		f.buf.Reset()
+		f.buf.WriteString(delta[idx:])
+		f.buffering = true
+		f.checkBuffer()
+		return
+	}
+	f.buf.WriteString(delta)
+	f.checkBuffer()
+}
+
+// checkBuffer inspects the current buffer for known markers and acts accordingly.
+func (f *streamFilter) checkBuffer() {
+	bufStr := f.buf.String()
+
+	// Tier 1: XML tool_call — suppress entire stream, signal retry.
+	for _, marker := range xmlToolCallMarkers {
+		if strings.Contains(bufStr, marker) {
+			f.xmlDetected = true
+			f.buf.Reset()
+			f.buffering = false
+			return
+		}
+	}
+
+	// Tier 2: Strip markers — remove tag strings, flush surrounding text.
+	// Note: only the marker strings themselves are removed; content between
+	// opening and closing tags (e.g. between <think> and </think>) passes through.
+	cleaned := bufStr
+	stripped := false
+	for _, marker := range stripMarkers {
+		if strings.Contains(cleaned, marker) {
+			cleaned = strings.ReplaceAll(cleaned, marker, "")
+			stripped = true
+		}
+	}
+	if stripped {
+		if cleaned != "" {
+			f.delegate(cleaned)
+		}
+		f.buf.Reset()
+		f.buffering = false
+		return
+	}
+
+	// Still could be a prefix of a known marker — keep buffering.
+	if isPrefixOfAny(bufStr) {
+		return
+	}
+
+	// Not a marker prefix — flush buffer.
+	f.delegate(bufStr)
+	f.buf.Reset()
+	f.buffering = false
+}
+
+// Flush flushes any remaining buffered content when the stream ends.
+func (f *streamFilter) Flush() {
+	if f.buf.Len() > 0 && !f.xmlDetected {
+		f.delegate(f.buf.String())
+	}
+	f.buf.Reset()
+	f.buffering = false
+}
+
+// isPrefixOfAny returns true if s is a prefix of any known marker.
+// Used to determine whether to keep buffering when we see a partial '<' sequence.
+func isPrefixOfAny(s string) bool {
+	return hasPrefixInSlice(s, xmlToolCallMarkers) || hasPrefixInSlice(s, stripMarkers)
+}
+
+// hasPrefixInSlice returns true if any marker in the slice starts with s.
+func hasPrefixInSlice(s string, markers []string) bool {
+	for _, marker := range markers {
+		if strings.HasPrefix(marker, s) {
+			return true
+		}
+	}
+	return false
+}
+
 // streamOneTurn streams a single LLM response (no tools).
-// Returns the full text and any error.
+// Returns the full unfiltered text, whether XML was detected, and any error.
+// The filter suppresses XML tool_call output from OnDelta and strips think tags.
+// filter.Flush() is deferred so buffered content is always emitted, even on error.
 func streamOneTurn(
 	ctx context.Context,
 	model fantasy.LanguageModel,
 	messages []fantasy.Message,
 	maxTokens int64,
 	onDelta func(string),
-) (string, error) {
+) (string, bool, error) {
 	stream, err := model.Stream(ctx, fantasy.Call{
 		Prompt:          fantasy.Prompt(messages),
 		MaxOutputTokens: &maxTokens,
 	})
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 
+	filter := &streamFilter{delegate: onDelta}
+	defer filter.Flush()
 	var fullText strings.Builder
 	for part := range stream {
 		switch part.Type {
 		case fantasy.StreamPartTypeTextDelta:
 			fullText.WriteString(part.Delta)
-			onDelta(part.Delta)
+			filter.Write(part.Delta)
 		case fantasy.StreamPartTypeError:
 			if part.Error != nil {
-				return fullText.String(), part.Error
+				return fullText.String(), filter.xmlDetected, part.Error
 			}
 		}
 	}
-	return fullText.String(), nil
+	return fullText.String(), filter.xmlDetected, nil
 }
 
 // newAssistantMessage wraps text as a fantasy assistant message.
