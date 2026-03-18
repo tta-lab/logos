@@ -188,6 +188,61 @@ func TestRun_OnCommandStartCallback(t *testing.T) {
 	assert.Equal(t, []string{"ls"}, called)
 }
 
+func TestRun_OnCommandResultCallback(t *testing.T) {
+	model := &mockLanguageModel{responses: []string{"$ echo hello", "done"}}
+	runner := &mockRunner{response: RunResponse{Stdout: "hello", ExitCode: 0}}
+	var events []string
+	cbs := Callbacks{
+		OnCommandStart: func(cmd string) { events = append(events, "start:"+cmd) },
+		OnCommandResult: func(cmd, output string, exitCode int) {
+			events = append(events, fmt.Sprintf("result:%s:%s:%d", cmd, output, exitCode))
+		},
+	}
+	_, err := Run(context.Background(), newCfg(model, runner), nil, "q", cbs)
+	require.NoError(t, err)
+	require.Len(t, events, 2)
+	assert.Equal(t, "start:echo hello", events[0])
+	assert.Equal(t, "result:echo hello:hello:0", events[1])
+}
+
+func TestRun_OnCommandResultCallback_NonZeroExit(t *testing.T) {
+	model := &mockLanguageModel{responses: []string{"$ false", "done"}}
+	runner := &mockRunner{response: RunResponse{Stderr: "err msg", ExitCode: 1}}
+	var resultOutput string
+	var resultExitCode int
+	cbs := Callbacks{
+		OnCommandResult: func(cmd, output string, exitCode int) {
+			resultOutput = output
+			resultExitCode = exitCode
+		},
+	}
+	result, err := Run(context.Background(), newCfg(model, runner), nil, "q", cbs)
+	require.NoError(t, err)
+	// callback receives raw output without exit code suffix
+	// Stdout is empty so output starts with the STDERR separator
+	assert.Equal(t, "\nSTDERR:\nerr msg", resultOutput)
+	assert.Equal(t, 1, resultExitCode)
+	// LLM-facing step content still includes exit code suffix
+	assert.Contains(t, result.Steps[1].Content, "(exit code: 1)")
+}
+
+func TestRun_OnCommandResultCallback_TransportError(t *testing.T) {
+	model := &mockLanguageModel{responses: []string{"$ ls", "done"}}
+	runner := &mockRunner{err: fmt.Errorf("socket closed")}
+	var callbackOutput string
+	var callbackExitCode int
+	cbs := Callbacks{
+		OnCommandResult: func(cmd, output string, exitCode int) {
+			callbackOutput = output
+			callbackExitCode = exitCode
+		},
+	}
+	_, err := Run(context.Background(), newCfg(model, runner), nil, "q", cbs)
+	require.NoError(t, err) // transport failure is surfaced to LLM, not as Run() error
+	assert.Equal(t, -1, callbackExitCode)
+	assert.Contains(t, callbackOutput, "execution error:")
+}
+
 func TestRun_XMLRetry_RecoversToDollarCommand(t *testing.T) { //nolint:dupl
 	// Turn 1: model outputs XML. Turn 2: model corrects to $ command. Turn 3: done.
 	model := &mockLanguageModel{responses: []string{
