@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"charm.land/fantasy"
@@ -140,7 +141,8 @@ func TestRun_OneCommandThenDone(t *testing.T) {
 	assert.Equal(t, "Let me check.\n", result.Response[:len("Let me check.\n")])
 	assert.Contains(t, result.Response, "The files are: main.go")
 	assert.Len(t, result.Steps, 3) // assistant, command, assistant
-	assert.Equal(t, StepRoleCommand, result.Steps[1].Role)
+	assert.Equal(t, StepRoleUser, result.Steps[1].Role)
+	assert.True(t, strings.HasPrefix(result.Steps[1].Content, "$ "))
 	require.Len(t, runner.calls, 1)
 	assert.Equal(t, "ls -la", runner.calls[0].Command) // exact command forwarded unchanged
 }
@@ -170,7 +172,8 @@ func TestRun_SandboxNonZeroExitIncludedInOutput(t *testing.T) {
 	runner := &mockRunner{response: RunResponse{Stderr: "error msg", ExitCode: 1}}
 	result, err := Run(context.Background(), newCfg(model, runner), nil, "run", Callbacks{})
 	require.NoError(t, err)
-	assert.Equal(t, StepRoleCommand, result.Steps[1].Role)
+	assert.Equal(t, StepRoleUser, result.Steps[1].Role)
+	assert.True(t, strings.HasPrefix(result.Steps[1].Content, "$ "))
 	assert.Contains(t, result.Steps[1].Content, "(exit code: 1)")
 	assert.Contains(t, result.Steps[1].Content, "error msg")
 }
@@ -200,7 +203,7 @@ func TestRun_XMLRetry_RecoversToDollarCommand(t *testing.T) {
 	assert.Equal(t, "rg foo /path", runner.calls[0].Command)
 	// Steps: xml-assistant, feedback, dollar-assistant, command-output, final-assistant
 	assert.Len(t, result.Steps, 5)
-	assert.Equal(t, StepRoleCommand, result.Steps[1].Role) // feedback step
+	assert.Equal(t, StepRoleUser, result.Steps[1].Role) // feedback step
 	assert.Contains(t, result.Steps[1].Content, "XML/structured tool_call format")
 }
 
@@ -236,7 +239,7 @@ func TestRun_MultiCommand_RejectsAndRetries(t *testing.T) {
 	assert.Equal(t, "pwd", runner.calls[0].Command)
 	// Steps: multi-assistant, rejection-feedback, single-assistant, command-output, final-assistant
 	assert.Len(t, result.Steps, 5)
-	assert.Equal(t, StepRoleCommand, result.Steps[1].Role)
+	assert.Equal(t, StepRoleUser, result.Steps[1].Role)
 	assert.Contains(t, result.Steps[1].Content, "multiple $ commands")
 }
 

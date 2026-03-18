@@ -16,7 +16,7 @@ type StepRole string
 
 const (
 	StepRoleAssistant StepRole = "assistant"
-	StepRoleCommand   StepRole = "command"
+	StepRoleUser      StepRole = "user"
 )
 
 // DefaultMaxSteps is the fallback max steps when Config.MaxSteps is 0.
@@ -149,7 +149,7 @@ func Run(
 					feedback := "Error: You used XML/structured tool_call format. This is not supported.\n" +
 						"Use $ command format instead. Example: $ rg 'pattern' /path\n" +
 						"Do NOT use <invoke>, <tool_call>, or XML tags. One command per $ line."
-					steps = append(steps, StepMessage{Role: StepRoleCommand, Content: feedback, Timestamp: time.Now().UTC()})
+					steps = append(steps, StepMessage{Role: StepRoleUser, Content: feedback, Timestamp: time.Now().UTC()})
 					messages = append(messages, newAssistantMessage(fullText), fantasy.NewUserMessage(feedback))
 					step-- // don't count XML correction against step budget
 					continue
@@ -171,7 +171,7 @@ func Run(
 			feedback := "Error: You wrote multiple $ commands in one message. " +
 				"Only one command per message is supported.\n" +
 				"Run one command, wait for its output, then run the next."
-			steps = append(steps, StepMessage{Role: StepRoleCommand, Content: feedback, Timestamp: time.Now().UTC()})
+			steps = append(steps, StepMessage{Role: StepRoleUser, Content: feedback, Timestamp: time.Now().UTC()})
 			messages = append(messages, newAssistantMessage(fullText), fantasy.NewUserMessage(feedback))
 			step-- // don't count multi-command correction against step budget
 			continue
@@ -183,9 +183,10 @@ func Run(
 		}
 
 		output := execCommand(ctx, cfg.Temenos, cmd.Args, cfg.SandboxEnv, cfg.AllowedPaths)
-		steps = append(steps, StepMessage{Role: StepRoleCommand, Content: output, Timestamp: time.Now().UTC()})
+		userContent := "$ " + cmd.Args + "\n" + output
+		steps = append(steps, StepMessage{Role: StepRoleUser, Content: userContent, Timestamp: time.Now().UTC()})
 
-		messages = append(messages, newAssistantMessage(fullText), fantasy.NewUserMessage(output))
+		messages = append(messages, newAssistantMessage(fullText), fantasy.NewUserMessage(userContent))
 	}
 
 	return &RunResult{
