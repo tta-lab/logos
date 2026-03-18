@@ -279,61 +279,119 @@ func TestRun_XMLRetry_ExhaustionReturnsError(t *testing.T) {
 	assert.NotNil(t, result)      // result returned for observability
 }
 
-func TestRun_MultiCommand_RejectsAndRetries(t *testing.T) { //nolint:dupl
-	// Turn 1: model outputs two $ commands (rejected, step not consumed).
-	// Turn 2: model corrects to single command. Turn 3: done.
+func TestRun_MultiCommand_ExecutesAll(t *testing.T) {
 	model := &mockLanguageModel{responses: []string{
-		"$ pwd\n$ ls -la",
-		"$ pwd",
-		"Current dir is /home.",
+		"Let me check.\n$ pwd\n$ ls -la",
+		"Found the files.",
 	}}
-	runner := &mockRunner{response: RunResponse{Stdout: "/home"}}
-	result, err := Run(context.Background(), newCfg(model, runner), nil, "where am I", Callbacks{})
+	runner := &mockRunner{response: RunResponse{Stdout: "ok"}}
+	var resultCmds []string
+	cbs := Callbacks{
+		OnCommandStart:  func(cmd string) {},
+		OnCommandResult: func(cmd string, output string, exitCode int) { resultCmds = append(resultCmds, cmd) },
+	}
+	result, err := Run(context.Background(), newCfg(model, runner), nil, "check", cbs)
 	require.NoError(t, err)
-	assert.Contains(t, result.Response, "Current dir is /home.")
-	require.Len(t, runner.calls, 1) // only the corrected single-command turn executed
+	assert.Contains(t, result.Response, "Found the files.")
+	require.Len(t, runner.calls, 2)
 	assert.Equal(t, "pwd", runner.calls[0].Command)
-	// Steps: multi-assistant, rejection-feedback, single-assistant, command-output, final-assistant
-	assert.Len(t, result.Steps, 5)
-	assert.Equal(t, StepRoleUser, result.Steps[1].Role)
-	assert.Contains(t, result.Steps[1].Content, "multiple $ commands")
-	assert.True(t, strings.HasPrefix(result.Steps[3].Content, "$ ")) // command output step
+	assert.Equal(t, "ls -la", runner.calls[1].Command)
+	assert.Equal(t, []string{"pwd", "ls -la"}, resultCmds)
 }
 
-func TestRun_MultiCommand_RetryCapExhaustion(t *testing.T) {
-	// Model always outputs multi-command turns — retry cap should trigger after MaxMultiCmdRetries.
-	// MaxMultiCmdRetries+1 calls are made: MaxMultiCmdRetries corrections + 1 that fires the cap.
-	responses := make([]string, MaxMultiCmdRetries+1)
-	for i := range responses {
-		responses[i] = "$ cmd1\n$ cmd2"
+func TestRun_MultiCommand_ExitCodeFormatted(t *testing.T) {
+	model := &mockLanguageModel{responses: []string{
+		"$ false\n$ echo ok",
+		"Got it.",
+	}}
+	runner := &mockRunner{response: RunResponse{Stderr: "error", ExitCode: 1}}
+	result, err := Run(context.Background(), newCfg(model, runner), nil, "run", Callbacks{})
+	require.NoError(t, err)
+	cmdStep := result.Steps[1]
+	assert.Equal(t, StepRoleUser, cmdStep.Role)
+	assert.Contains(t, cmdStep.Content, "(exit code: 1)")
+}
+
+func TestRun_MultiCommand_WithHeredoc(t *testing.T) {
+	model := &mockLanguageModel{responses: []string{
+		"$ cat <<'EOF'\nhello\nEOF\n$ ls -la",
+		"Done.",
+	}}
+	runner := &mockRunner{response: RunResponse{Stdout: "ok"}}
+	result, err := Run(context.Background(), newCfg(model, runner), nil, "go", Callbacks{})
+	require.NoError(t, err)
+	assert.Contains(t, result.Response, "Done.")
+	require.Len(t, runner.calls, 2)
+	assert.Equal(t, "cat <<'EOF'\nhello\nEOF", runner.calls[0].Command)
+	assert.Equal(t, "ls -la", runner.calls[1].Command)
+}
+
+func TestRun_MultiCommand_OnCommandStartPerCommand(t *testing.T) {
+	model := &mockLanguageModel{responses: []string{
+		"$ pwd\n$ ls\n$ echo hi",
+		"All done.",
+	}}
+	runner := &mockRunner{response: RunResponse{Stdout: "ok"}}
+	var started []string
+	cbs := Callbacks{OnCommandStart: func(cmd string) { started = append(started, cmd) }}
+	_, err := Run(context.Background(), newCfg(model, runner), nil, "go", cbs)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"pwd", "ls", "echo hi"}, started)
+}
+
+func TestRun_ConsecutiveCommands_SoftWarning(t *testing.T) {
+	responses := make([]string, 12)
+	for i := 0; i < 11; i++ {
+		responses[i] = fmt.Sprintf("$ echo step%d", i)
+	}
+	responses[11] = "Done."
+	model := &mockLanguageModel{responses: responses}
+	runner := &mockRunner{response: RunResponse{Stdout: "ok"}}
+	result, err := Run(context.Background(), newCfg(model, runner), nil, "go", Callbacks{})
+	require.NoError(t, err)
+	var warningCount int
+	for _, s := range result.Steps {
+		if s.Role == StepRoleUser && strings.Contains(s.Content, "without explaining") {
+			warningCount++
+		}
+	}
+	assert.Equal(t, 1, warningCount, "soft warning should fire exactly once at SoftWarningThreshold")
+}
+
+func TestRun_ConsecutiveCommands_TextResponseTerminatesLoop(t *testing.T) {
+	responses := []string{
+		"$ echo 1", "$ echo 2", "$ echo 3", "$ echo 4", "$ echo 5",
+		"Halfway.",
+		"$ echo 6", "$ echo 7", "$ echo 8", "$ echo 9", "$ echo 10",
+		"Done.",
 	}
 	model := &mockLanguageModel{responses: responses}
-	runner := &mockRunner{}
+	runner := &mockRunner{response: RunResponse{Stdout: "ok"}}
 	result, err := Run(context.Background(), newCfg(model, runner), nil, "go", Callbacks{})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "multi-command")
-	assert.Contains(t, err.Error(), fmt.Sprintf("%d", MaxMultiCmdRetries))
-	assert.Equal(t, MaxMultiCmdRetries+1, model.call) // exactly MaxMultiCmdRetries corrections + 1 cap trigger
-	assert.Empty(t, runner.calls)                     // runner never called
-	assert.NotNil(t, result)                          // result returned for observability
+	require.NoError(t, err)
+	for _, s := range result.Steps {
+		if s.Role == StepRoleUser {
+			assert.NotContains(t, s.Content, "without explaining",
+				"no soft warning — counter resets on text")
+		}
+	}
 }
 
-func TestRun_MultiCommand_ExhaustionHitsMaxSteps(t *testing.T) {
-	// Multi-command rejection (not counted) then real commands exhaust step budget.
-	responses := make([]string, 20)
-	responses[0] = "$ cmd1\n$ cmd2" // rejected, step not consumed
-	for i := 1; i < len(responses); i++ {
+func TestRun_ConsecutiveCommands_HardExit(t *testing.T) {
+	responses := make([]string, 25)
+	for i := range responses {
 		responses[i] = "$ echo loop"
 	}
 	model := &mockLanguageModel{responses: responses}
-	runner := &mockRunner{response: RunResponse{Stdout: "loop"}}
+	runner := &mockRunner{response: RunResponse{Stdout: "ok"}}
 	cfg := newCfg(model, runner)
-	cfg.MaxSteps = 2
-	result, err := Run(context.Background(), cfg, nil, "go", Callbacks{})
+	cfg.MaxSteps = 50
+	_, err := Run(context.Background(), cfg, nil, "go", Callbacks{})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "max steps")
-	assert.Len(t, runner.calls, 2) // exactly MaxSteps real commands executed
-	assert.NotNil(t, result)
+	assert.Contains(t, err.Error(), "consecutive command turns")
+	// Hard exit fires when the 20th command turn is attempted (consecutiveCmdTurns == 19 before check).
+	// Turns 0–18 execute (19 runner calls); turn 19 exits before execution.
+	assert.Len(t, runner.calls, 19)
 }
 
 func TestRun_HeredocCommand_FullBlockSentToRunner(t *testing.T) {
