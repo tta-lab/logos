@@ -16,7 +16,7 @@ type StepRole string
 
 const (
 	StepRoleAssistant StepRole = "assistant" // LLM turn with no commands (final answer)
-	StepRoleUser      StepRole = "user"      // injected directives (XML retry, soft warning)
+	StepRoleUser      StepRole = "user"      // injected directives (e.g. XML retry)
 	StepRoleCommand   StepRole = "command"   // LLM turn that contains ! commands
 	StepRoleResult    StepRole = "result"    // command output fed back to LLM
 )

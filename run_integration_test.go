@@ -141,6 +141,7 @@ func TestRun_OneCommandThenDone(t *testing.T) {
 	assert.Equal(t, "Let me check.\n", result.Response[:len("Let me check.\n")])
 	assert.Contains(t, result.Response, "The files are: main.go")
 	assert.Len(t, result.Steps, 3) // command, result, assistant
+	assert.Equal(t, StepRoleCommand, result.Steps[0].Role)
 	assert.Equal(t, StepRoleResult, result.Steps[1].Role)
 	assert.True(t, strings.HasPrefix(result.Steps[1].Content, "! "))
 	require.Len(t, runner.calls, 1)
