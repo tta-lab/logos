@@ -31,7 +31,7 @@ const MaxXMLRetries = 2
 
 // MaxMultiCmdRetries is the number of times the loop will inject error feedback
 // when a model outputs multiple $ commands in one turn.
-const MaxMultiCmdRetries = 3
+const MaxMultiCmdRetries = 10
 
 // Re-exported from temenos/client so consumers don't import temenos directly.
 type (
