@@ -125,7 +125,7 @@ func Run(
 		steps           []StepMessage
 		responseText    strings.Builder
 		xmlRetries      int
-		multiCmdRetries int
+		multiCmdRetries int // counts total multi-command violations across the session (intentional — not reset on success, mirrors xmlRetries)
 	)
 
 	for step := 0; step < maxSteps; step++ {
