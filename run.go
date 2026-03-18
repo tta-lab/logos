@@ -83,6 +83,9 @@ type Callbacks struct {
 	OnDelta func(text string)
 	// OnCommandStart is called when a $ command is detected, before execution.
 	OnCommandStart func(command string)
+	// OnCommandResult is called after a command executes with the command string,
+	// raw combined stdout+stderr output (no exit code suffix), and the exit code.
+	OnCommandResult func(command string, output string, exitCode int)
 }
 
 // Run executes the agent loop: prompt → LLM → $ commands → repeat.
@@ -182,8 +185,7 @@ func Run(
 			cbs.OnCommandStart(cmd.Args)
 		}
 
-		output := execCommand(ctx, cfg.Temenos, cmd.Args, cfg.SandboxEnv, cfg.AllowedPaths)
-		userContent := "$ " + cmd.Args + "\n" + output
+		userContent := "$ " + cmd.Args + "\n" + runAndNotify(ctx, cfg, cbs, cmd.Args)
 		steps = append(steps, StepMessage{Role: StepRoleUser, Content: userContent, Timestamp: time.Now().UTC()})
 
 		messages = append(messages, newAssistantMessage(fullText), fantasy.NewUserMessage(userContent))
@@ -195,11 +197,27 @@ func Run(
 	}, fmt.Errorf("logos: max steps (%d) reached", maxSteps)
 }
 
-// execCommand runs a shell command via the temenos daemon and returns formatted output.
+// runAndNotify executes a command, fires OnCommandResult, and returns the
+// LLM-formatted output string (with exit code suffix appended for non-zero exits).
+func runAndNotify(ctx context.Context, cfg Config, cbs Callbacks, args string) string {
+	rawOutput, exitCode := execCommand(ctx, cfg.Temenos, args, cfg.SandboxEnv, cfg.AllowedPaths)
+	if cbs.OnCommandResult != nil {
+		cbs.OnCommandResult(args, rawOutput, exitCode)
+	}
+	if exitCode != 0 {
+		return rawOutput + fmt.Sprintf("\n(exit code: %d)", exitCode)
+	}
+	return rawOutput
+}
+
+// execCommand runs a shell command via the temenos daemon and returns the raw
+// combined output and exit code. The "(no output)" sentinel is included in
+// rawOutput when the command produces nothing. On temenos error, returns an
+// error string and exitCode -1.
 func execCommand(
 	ctx context.Context, tc CommandRunner, args string,
 	env map[string]string, paths []AllowedPath,
-) string {
+) (rawOutput string, exitCode int) {
 	resp, err := tc.Run(ctx, RunRequest{
 		Command:      args,
 		Env:          env,
@@ -207,20 +225,17 @@ func execCommand(
 	})
 	if err != nil {
 		slog.Warn("temenos exec failure", "args", args, "error", err)
-		return fmt.Sprintf("execution error: %v", err)
+		return fmt.Sprintf("execution error: %v", err), -1
 	}
 
 	output := resp.Stdout
 	if resp.Stderr != "" {
 		output += "\nSTDERR:\n" + resp.Stderr
 	}
-	if resp.ExitCode != 0 {
-		output += fmt.Sprintf("\n(exit code: %d)", resp.ExitCode)
-	}
 	if output == "" {
 		output = "(no output)"
 	}
-	return output
+	return output, resp.ExitCode
 }
 
 // scanForCommand finds the first $ command in text.
