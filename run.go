@@ -174,16 +174,21 @@ func Run(
 		responseText.WriteString(preText)
 
 		// Hard exit check — BEFORE executing or incrementing (don't waste cycles on a degenerate turn).
-		// consecutiveCmdTurns reflects turns already executed, so the error is accurate.
+		// Report consecutiveCmdTurns+1 (the attempted turn count) to match HardExitThreshold.
 		if consecutiveCmdTurns+1 >= HardExitThreshold {
 			return &RunResult{Response: responseText.String(), Steps: steps},
-				fmt.Errorf("logos: %d consecutive command turns without a text response", consecutiveCmdTurns)
+				fmt.Errorf("logos: %d consecutive command turns without a text response", consecutiveCmdTurns+1)
 		}
 		consecutiveCmdTurns++
 
 		// Execute each command via runAndNotify (fires OnCommandResult callback),
 		// then format output for LLM with exit code suffix.
 		userContent := strings.Join(executeCommands(ctx, cfg, cbs, cmds), "\n")
+		if userContent == "" {
+			// ctx was already cancelled before any command ran; next streamOneTurn will
+			// return the context error and propagate it cleanly.
+			continue
+		}
 
 		// Soft warning — append to command output to avoid consecutive user messages,
 		// which some LLM providers reject.
