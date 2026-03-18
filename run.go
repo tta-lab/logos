@@ -359,7 +359,8 @@ func scanAllCommands(text string) (preText string, cmds []Command) {
 }
 
 // streamFilter sits between the LLM stream and OnDelta, filtering XML tool_call
-// markers (suppress + retry) and strip markers like </think> (silent removal).
+// markers (suppress + retry) and strip markers like </think> (tag-only removal —
+// inter-tag content is passed through unchanged).
 type streamFilter struct {
 	delegate    func(string)
 	buf         strings.Builder
@@ -406,7 +407,9 @@ func (f *streamFilter) checkBuffer() {
 		}
 	}
 
-	// Tier 2: Strip markers — remove all tags, flush surrounding text.
+	// Tier 2: Strip markers — remove tag strings, flush surrounding text.
+	// Note: only the marker strings themselves are removed; content between
+	// opening and closing tags (e.g. between <think> and </think>) passes through.
 	cleaned := bufStr
 	stripped := false
 	for _, marker := range stripMarkers {
@@ -447,12 +450,12 @@ func (f *streamFilter) Flush() {
 // isPrefixOfAny returns true if s is a prefix of any known marker.
 // Used to determine whether to keep buffering when we see a partial '<' sequence.
 func isPrefixOfAny(s string) bool {
-	for _, marker := range xmlToolCallMarkers {
-		if strings.HasPrefix(marker, s) {
-			return true
-		}
-	}
-	for _, marker := range stripMarkers {
+	return hasPrefixInSlice(s, xmlToolCallMarkers) || hasPrefixInSlice(s, stripMarkers)
+}
+
+// hasPrefixInSlice returns true if any marker in the slice starts with s.
+func hasPrefixInSlice(s string, markers []string) bool {
+	for _, marker := range markers {
 		if strings.HasPrefix(marker, s) {
 			return true
 		}
@@ -463,6 +466,7 @@ func isPrefixOfAny(s string) bool {
 // streamOneTurn streams a single LLM response (no tools).
 // Returns the full unfiltered text, whether XML was detected, and any error.
 // The filter suppresses XML tool_call output from OnDelta and strips think tags.
+// filter.Flush() is deferred so buffered content is always emitted, even on error.
 func streamOneTurn(
 	ctx context.Context,
 	model fantasy.LanguageModel,
@@ -479,6 +483,7 @@ func streamOneTurn(
 	}
 
 	filter := &streamFilter{delegate: onDelta}
+	defer filter.Flush()
 	var fullText strings.Builder
 	for part := range stream {
 		switch part.Type {
@@ -487,11 +492,10 @@ func streamOneTurn(
 			filter.Write(part.Delta)
 		case fantasy.StreamPartTypeError:
 			if part.Error != nil {
-				return fullText.String(), false, part.Error
+				return fullText.String(), filter.xmlDetected, part.Error
 			}
 		}
 	}
-	filter.Flush()
 	return fullText.String(), filter.xmlDetected, nil
 }
 

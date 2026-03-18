@@ -306,7 +306,9 @@ func TestRun_XMLRetry_ConsumesNormalSteps(t *testing.T) {
 }
 
 func TestRun_XMLRetry_ThinkTagStripped(t *testing.T) {
-	// Model outputs think tags — they should be stripped silently, no retry triggered.
+	// Model outputs think tags — tag strings are stripped, no retry triggered.
+	// Note: only the tag markers are removed from OnDelta; inter-tag content
+	// (e.g. "reasoning") passes through unchanged. Raw LLM output in Steps is unaffected.
 	model := &mockLanguageModel{responses: []string{
 		"<think>reasoning</think>Here is the result",
 	}}
@@ -320,7 +322,7 @@ func TestRun_XMLRetry_ThinkTagStripped(t *testing.T) {
 	require.NoError(t, err)
 	// Full text in Steps still includes think tags (raw LLM output)
 	assert.Contains(t, result.Steps[0].Content, "<think>")
-	// But OnDelta received only the filtered text
+	// OnDelta received text with tag markers stripped (not the inter-tag content)
 	assert.NotContains(t, deltaOutput, "<think>")
 	assert.Contains(t, deltaOutput, "Here is the result")
 }

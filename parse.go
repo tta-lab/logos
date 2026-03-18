@@ -77,7 +77,7 @@ func heredocDelimiter(cmdArgs string) (string, bool) {
 
 // ContainsXMLToolCall returns true if text contains XML tool_call patterns
 // produced by models that default to structured format (e.g. minimax).
-// Used to detect wrong output format and trigger error feedback.
+// Standalone utility — internal detection is handled by streamFilter during streaming.
 func ContainsXMLToolCall(text string) bool {
 	for _, marker := range xmlToolCallMarkers {
 		if strings.Contains(text, marker) {
@@ -98,9 +98,7 @@ var xmlToolCallMarkers = []string{
 	"</minimax:tool_call>",
 	"<minimax:tool_call ",
 	"<invoke name=",
-	"</invoke>",
 	"<function_call>",
-	"</function_call>",
 	"<function_call ",
 }
 

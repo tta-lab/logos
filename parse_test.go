@@ -51,15 +51,15 @@ func TestContainsXMLToolCall(t *testing.T) {
 		{"tool_call tag", "<tool_call>\nsome content\n</tool_call>", true},
 		{"closing tool_call tag", "</tool_call>", true},
 		{"tool_call with attributes", "<tool_call name=\"foo\">", true},
-		{"closing invoke tag", "</invoke>", true},
+		{"closing invoke tag", "</invoke>", false}, // bare closing tag — not a marker (prose false-positive risk)
 		{"function_call tag", "<function_call>", true},
-		{"closing function_call tag", "</function_call>", true},
+		{"closing function_call tag", "</function_call>", false}, // bare closing tag — not a marker
 		{"function_call with attributes", "<function_call name=\"foo\">", true},
 		{"minimax closing tag", "</minimax:tool_call>", true},
 		{"normal bang cmd", "! ls -la\nsome output", false},
 		{"plain text", "Here is the answer to your question.", false},
 		{"invoke in prose", "We invoke the function by calling...", false},
-		{"closing invoke in prose", "The </invoke> tag closes the block.", true}, // </invoke> is a marker
+		{"closing invoke in prose", "The </invoke> tag closes the block.", false}, // not a marker
 		{"old dollar prefix not detected", "$ ls -la\nsome output", false},
 	}
 	for _, tt := range tests {
