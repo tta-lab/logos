@@ -8,6 +8,8 @@ require (
 	github.com/tta-lab/temenos v0.2.1
 )
 
+replace charm.land/fantasy => github.com/tta-lab/fantasy v0.14.1-ttal
+
 require (
 	github.com/charmbracelet/x/exp/slice v0.0.0-20250904123553-b4e2667e5ad5 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect

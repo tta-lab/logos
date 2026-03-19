@@ -1,5 +1,3 @@
-charm.land/fantasy v0.12.3 h1:gvqRWD7vWmpNN0VcQ+rSku5QdTlLegqrlJDVCDdAh58=
-charm.land/fantasy v0.12.3/go.mod h1:noWyUtEgUrfsRXqmGbz7NQlZpf6KFwNwjA+jzdS3No8=
 github.com/charmbracelet/x/exp/slice v0.0.0-20250904123553-b4e2667e5ad5 h1:DTSZxdV9qQagD4iGcAt9RgaRBZtJl01bfKgdLzUzUPI=
 github.com/charmbracelet/x/exp/slice v0.0.0-20250904123553-b4e2667e5ad5/go.mod h1:vI5nDVMWi6veaYH+0Fmvpbe/+cv/iJfMntdh+N0+Tms=
 github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc h1:U9qPSI2PIWSS1VwoXQT9A3Wy9MM3WgvqSxFWenqJduM=
@@ -24,6 +22,8 @@ github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 h1:Jamvg5psRI
 github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu7U=
 github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
+github.com/tta-lab/fantasy v0.14.1-ttal h1:QFYGj0XsxE+Jrgf8oaLfYWBDLBml+hWirJgukauYcbo=
+github.com/tta-lab/fantasy v0.14.1-ttal/go.mod h1:9L50Xe+Dvc23rjjOeas4Ez0jOd2NuiXSpqmPxBHQ3mQ=
 github.com/tta-lab/temenos v0.2.1 h1:XqipY08BHtg/Wv2Y/8zB6AAcmFD0mBaB/PTIHmduXiA=
 github.com/tta-lab/temenos v0.2.1/go.mod h1:3iC34EMHVaF9evvPyBJPNUDBPTeyLFKJPvG73CvOlME=
 github.com/yuin/goldmark v1.7.16 h1:n+CJdUxaFMiDUNnWC3dMWCIQJSkxH4uz3ZwQBkAlVNE=
