@@ -473,14 +473,35 @@ func hasPrefixInSlice(s string, markers []string) bool {
 // The § prefix (CommandPrefix from parse.go) is 3 bytes in UTF-8 (§ = 0xC2A7, then
 // space = 0x20). We buffer at most the first few bytes of each line to make the decision.
 type cmdLineFilter struct {
-	delegate    func(string) // receives non-command text (typically streamFilter.Write)
-	lineBuf     strings.Builder
-	suppressing bool // true once current line confirmed as § command
+	delegate     func(string) // receives non-command text (typically streamFilter.Write)
+	lineBuf      strings.Builder
+	suppressing  bool   // true once current line confirmed as § command
+	heredocDelim string // non-empty when inside a heredoc body (suppressing until close)
 }
 
-// Write processes a streaming delta, suppressing § command lines.
+// Write processes a streaming delta, suppressing § command lines and heredoc bodies.
 func (f *cmdLineFilter) Write(delta string) {
 	for i := 0; i < len(delta); {
+		// Heredoc body suppression — suppress all lines until closing delimiter.
+		if f.heredocDelim != "" {
+			nl := strings.IndexByte(delta[i:], '\n')
+			if nl == -1 {
+				// No newline — buffer for heredoc close check.
+				f.lineBuf.WriteString(delta[i:])
+				return
+			}
+			line := delta[i : i+nl]
+			f.lineBuf.WriteString(line)
+			fullLine := f.lineBuf.String()
+			f.lineBuf.Reset() // reset before next iteration so lines don't accumulate
+			i += nl + 1
+			if isHeredocClose(fullLine, f.heredocDelim) {
+				f.heredocDelim = ""
+			}
+			// Either way, suppress the line (body or closing delimiter).
+			continue
+		}
+
 		if f.suppressing {
 			// Scan for newline to end suppression of current § line.
 			nl := strings.IndexByte(delta[i:], '\n')
@@ -518,24 +539,30 @@ func (f *cmdLineFilter) Write(delta string) {
 		fullLine := f.lineBuf.String()
 
 		if strings.HasPrefix(strings.TrimSpace(fullLine), CommandPrefix) {
+			// Check for heredoc in the complete command line.
+			if delim, ok := heredocDelimiter(fullLine); ok {
+				f.heredocDelim = delim
+			}
+			f.suppressing = false // defensive reset; suppressing is always false here (callers that set it exit via return)
 			// Suppress entire line including \n.
 		} else {
 			f.delegate(fullLine + "\n")
 		}
 		f.lineBuf.Reset()
-		f.suppressing = false
 		i += nl + 1
 	}
 }
 
-// Flush emits any buffered partial line that isn't a § command.
+// Flush emits any buffered partial line that isn't a § command or heredoc content.
 // Called when the stream ends (deferred in streamOneTurn).
 func (f *cmdLineFilter) Flush() {
-	if f.lineBuf.Len() > 0 && !strings.HasPrefix(strings.TrimSpace(f.lineBuf.String()), CommandPrefix) {
+	if f.lineBuf.Len() > 0 && f.heredocDelim == "" && !f.suppressing &&
+		!strings.HasPrefix(strings.TrimSpace(f.lineBuf.String()), CommandPrefix) {
 		f.delegate(f.lineBuf.String())
 	}
 	f.lineBuf.Reset()
 	f.suppressing = false
+	f.heredocDelim = ""
 }
 
 // streamOneTurn streams a single LLM response (no tools).
