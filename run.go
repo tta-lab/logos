@@ -17,7 +17,7 @@ type StepRole string
 const (
 	StepRoleAssistant StepRole = "assistant" // LLM turn with no commands (final answer)
 	StepRoleUser      StepRole = "user"      // human input
-	StepRoleCommand   StepRole = "command"   // LLM turn that contains ! commands
+	StepRoleCommand   StepRole = "command"   // LLM turn that contains § commands
 	StepRoleResult    StepRole = "result"    // command output fed back to LLM
 )
 
@@ -79,7 +79,7 @@ type RunResult struct {
 type Callbacks struct {
 	// OnDelta is called with each text delta as the LLM streams its response.
 	OnDelta func(text string)
-	// OnCommandStart is called when a ! command is detected, before execution.
+	// OnCommandStart is called when a § command is detected, before execution.
 	OnCommandStart func(command string)
 	// OnCommandResult is called after a command executes with the command string,
 	// raw combined stdout+stderr output (no exit code suffix), and the exit code.
@@ -91,7 +91,7 @@ type Callbacks struct {
 	OnRetry func(reason string, step int)
 }
 
-// Run executes the agent loop: prompt → LLM → ! commands → repeat.
+// Run executes the agent loop: prompt → LLM → § commands → repeat.
 // Stateless — the caller handles conversation persistence.
 func Run(
 	ctx context.Context,
@@ -145,8 +145,8 @@ func Run(
 
 		// Check XML BEFORE appending to Steps — don't expose XML garbage to consumers.
 		if xmlDetected {
-			directive := "(Your previous output was not processed. " +
-				"To run a command, write a line starting with ! e.g. ! ls -la)"
+			directive := "(Your previous output was rejected — XML tool calls are not supported. " +
+				"To run a command, write a line starting with § e.g. § ls -la)"
 			slog.Warn("XML tool_call detected, injecting directive", "step", step)
 			if cbs.OnRetry != nil {
 				cbs.OnRetry("xml_tool_call", step)
@@ -225,7 +225,7 @@ func executeCommands(ctx context.Context, cfg Config, cbs Callbacks, cmds []Comm
 			cbs.OnCommandStart(cmd.Args)
 		}
 		rawOutput, exitCode := runAndNotify(ctx, cfg, cbs, cmd.Args)
-		outputParts = append(outputParts, "! "+cmd.Args+"\n"+formatForLLM(rawOutput, exitCode))
+		outputParts = append(outputParts, CommandPrefix+cmd.Args+"\n"+formatForLLM(rawOutput, exitCode))
 	}
 	return outputParts
 }
@@ -283,9 +283,9 @@ func captureHeredoc(lines []string, startIdx int, c Command, delim string) (Comm
 	return c, false
 }
 
-// scanForCommand finds the first ! command in text.
+// scanForCommand finds the first § command in text.
 // If the command contains a heredoc (<<DELIM), captures lines through the
-// closing delimiter. Otherwise captures only the ! line.
+// closing delimiter. Otherwise captures only the § line.
 // Returns text before the command, the command, and whether one was found.
 func scanForCommand(text string) (preText string, cmd Command, found bool) {
 	lines := strings.Split(text, "\n")
@@ -312,7 +312,7 @@ func scanForCommand(text string) (preText string, cmd Command, found bool) {
 	return text, Command{}, false
 }
 
-// scanAllCommands extracts all ! commands from text, in order.
+// scanAllCommands extracts all § commands from text, in order.
 // Returns the text before the first command and a slice of commands.
 // Heredoc bodies are captured as part of their parent command (not split).
 // Unclosed heredocs fall back to single-line capture with a warning.

@@ -21,21 +21,21 @@ func TestScanForCommand(t *testing.T) {
 		},
 		{
 			name:    "command at start",
-			text:    "! ls -la",
+			text:    "§ ls -la",
 			wantPre: "",
 			wantCmd: "ls -la",
 			wantOK:  true,
 		},
 		{
 			name:    "text before command",
-			text:    "Let me check the files.\n! ls -la",
+			text:    "Let me check the files.\n§ ls -la",
 			wantPre: "Let me check the files.\n",
 			wantCmd: "ls -la",
 			wantOK:  true,
 		},
 		{
 			name:    "multiline text before command",
-			text:    "First line.\nSecond line.\n! rg pattern /dir",
+			text:    "First line.\nSecond line.\n§ rg pattern /dir",
 			wantPre: "First line.\nSecond line.\n",
 			wantCmd: "rg pattern /dir",
 			wantOK:  true,
@@ -49,7 +49,7 @@ func TestScanForCommand(t *testing.T) {
 		// Trailing prose — must NOT be captured
 		{
 			name:    "command with trailing prose not captured",
-			text:    "! ls -la\nI expect this to show files.",
+			text:    "§ ls -la\nI expect this to show files.",
 			wantPre: "",
 			wantCmd: "ls -la",
 			wantOK:  true,
@@ -57,7 +57,7 @@ func TestScanForCommand(t *testing.T) {
 		// Multi-command — only first returned (rejection handled in Run loop)
 		{
 			name:    "only first command taken",
-			text:    "! cmd1\n! cmd2",
+			text:    "§ cmd1\n§ cmd2",
 			wantPre: "",
 			wantCmd: "cmd1",
 			wantOK:  true,
@@ -65,49 +65,49 @@ func TestScanForCommand(t *testing.T) {
 		// Heredoc cases
 		{
 			name:    "heredoc captured",
-			text:    "! cat <<'EOF'\nline1\nline2\nEOF",
+			text:    "§ cat <<'EOF'\nline1\nline2\nEOF",
 			wantPre: "",
 			wantCmd: "cat <<'EOF'\nline1\nline2\nEOF",
 			wantOK:  true,
 		},
 		{
 			name:    "text before heredoc",
-			text:    "Let me write.\n! cat <<'EOF'\ncontent\nEOF",
+			text:    "Let me write.\n§ cat <<'EOF'\ncontent\nEOF",
 			wantPre: "Let me write.\n",
 			wantCmd: "cat <<'EOF'\ncontent\nEOF",
 			wantOK:  true,
 		},
 		{
 			name:    "heredoc with pipe",
-			text:    "! cat <<'EOF' | wc -l\nhello\nworld\nEOF",
+			text:    "§ cat <<'EOF' | wc -l\nhello\nworld\nEOF",
 			wantPre: "",
 			wantCmd: "cat <<'EOF' | wc -l\nhello\nworld\nEOF",
 			wantOK:  true,
 		},
 		{
 			name:    "dash heredoc with tabs",
-			text:    "! cat <<-'END'\n\thello\n\tworld\nEND",
+			text:    "§ cat <<-'END'\n\thello\n\tworld\nEND",
 			wantPre: "",
 			wantCmd: "cat <<-'END'\n\thello\n\tworld\nEND",
 			wantOK:  true,
 		},
 		{
 			name:    "heredoc with bang line in body",
-			text:    "! cat <<'EOF'\n! not_a_command\nsome text\nEOF",
+			text:    "§ cat <<'EOF'\n! not_a_command\nsome text\nEOF",
 			wantPre: "",
 			wantCmd: "cat <<'EOF'\n! not_a_command\nsome text\nEOF",
 			wantOK:  true,
 		},
 		{
 			name:    "unclosed heredoc falls through to single line",
-			text:    "! cat <<'EOF'\nline1\nline2\nno closing",
+			text:    "§ cat <<'EOF'\nline1\nline2\nno closing",
 			wantPre: "",
 			wantCmd: "cat <<'EOF'",
 			wantOK:  true,
 		},
 		{
 			name:    "dash heredoc with space before delimiter",
-			text:    "! cat <<- 'PLANEOF'\ncontent\nPLANEOF",
+			text:    "§ cat <<- 'PLANEOF'\ncontent\nPLANEOF",
 			wantPre: "",
 			wantCmd: "cat <<- 'PLANEOF'\ncontent\nPLANEOF",
 			wantOK:  true,
@@ -138,12 +138,12 @@ func TestScanAllCommands(t *testing.T) {
 		wantCmds []string
 	}{
 		{"no commands", "Just text.", "Just text.", nil},
-		{"one command", "! ls -la", "", []string{"ls -la"}},
-		{"two commands", "! pwd\n! ls -la", "", []string{"pwd", "ls -la"}},
-		{"text before commands", "Let me check.\n! pwd\n! ls", "Let me check.\n", []string{"pwd", "ls"}},
-		{"heredoc counts as one", "! cat <<'EOF'\nline1\nEOF\n! ls", "", []string{"cat <<'EOF'\nline1\nEOF", "ls"}},
-		{"bang in heredoc body ignored", "! cat <<'EOF'\n! fake\nEOF", "", []string{"cat <<'EOF'\n! fake\nEOF"}},
-		{"unclosed heredoc fallback then command", "! cat <<'EOF'\nno close\n! ls", "", []string{"cat <<'EOF'", "ls"}},
+		{"one command", "§ ls -la", "", []string{"ls -la"}},
+		{"two commands", "§ pwd\n§ ls -la", "", []string{"pwd", "ls -la"}},
+		{"text before commands", "Let me check.\n§ pwd\n§ ls", "Let me check.\n", []string{"pwd", "ls"}},
+		{"heredoc counts as one", "§ cat <<'EOF'\nline1\nEOF\n§ ls", "", []string{"cat <<'EOF'\nline1\nEOF", "ls"}},
+		{"bang in heredoc body ignored", "§ cat <<'EOF'\n! fake\nEOF", "", []string{"cat <<'EOF'\n! fake\nEOF"}},
+		{"unclosed heredoc fallback then command", "§ cat <<'EOF'\nno close\n§ ls", "", []string{"cat <<'EOF'", "ls"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
