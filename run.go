@@ -543,7 +543,7 @@ func (f *cmdLineFilter) Write(delta string) {
 			if delim, ok := heredocDelimiter(fullLine); ok {
 				f.heredocDelim = delim
 			}
-			f.suppressing = false // heredoc block takes over, or line is done
+			f.suppressing = false // defensive reset; suppressing is always false here (callers that set it exit via return)
 			// Suppress entire line including \n.
 		} else {
 			f.delegate(fullLine + "\n")

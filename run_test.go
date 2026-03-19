@@ -522,14 +522,48 @@ func TestCmdLineFilter_NoHeredocUnchanged(t *testing.T) {
 }
 
 func TestCmdLineFilter_HeredocAtEndOfStream(t *testing.T) {
-	// Stream ends inside heredoc body — Flush suppresses partial content.
+	// Stream ends mid-body-line (no trailing newline) — Flush must suppress the buffered content.
+	// Without trailing \n the partial body sits in lineBuf, exercising the heredocDelim == "" guard.
 	var out []string
 	f := &cmdLineFilter{delegate: func(s string) { out = append(out, s) }}
-	f.Write("§ cat <<'EOF'\nbody line\n")
-	// No EOF closer — stream ends.
+	f.Write("§ cat <<'EOF'\nbody line")
+	// No EOF closer and no trailing \n — stream ends with content in lineBuf.
 	f.Flush()
 	if len(out) != 0 {
 		t.Errorf("expected no output for unterminated heredoc, got %v", out)
+	}
+}
+
+func TestCmdLineFilter_HeredocBodyLineSplitMidLine(t *testing.T) {
+	// Delta ends mid-body-line, exercises lineBuf accumulation inside heredoc branch.
+	var out []string
+	f := &cmdLineFilter{delegate: func(s string) { out = append(out, s) }}
+	f.Write("§ cat <<'EOF' | flicknote add\n")
+	f.Write("body l")            // partial body line
+	f.Write("ine\nEOF\nafter\n") // rest of body, close, prose
+	f.Flush()
+	combined := ""
+	for _, s := range out {
+		combined += s
+	}
+	if combined != "after\n" {
+		t.Errorf("got %q, want %q", combined, "after\n")
+	}
+}
+
+func TestCmdLineFilter_HeredocCloseDelimiterSplitAcrossDeltas(t *testing.T) {
+	// Closing delimiter arrives split across two deltas — close detection must still fire.
+	var out []string
+	f := &cmdLineFilter{delegate: func(s string) { out = append(out, s) }}
+	f.Write("§ cat <<'EOF'\nbody\nEO") // delimiter split: "EO" in this delta
+	f.Write("F\nafter\n")              // "F\n" completes the close
+	f.Flush()
+	combined := ""
+	for _, s := range out {
+		combined += s
+	}
+	if combined != "after\n" {
+		t.Errorf("got %q, want %q", combined, "after\n")
 	}
 }
 
