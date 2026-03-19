@@ -291,3 +291,159 @@ func TestStreamFilter_Mixed_ThinkAndText(t *testing.T) {
 		t.Errorf("got %q, want %q", combined, "beforeafter")
 	}
 }
+
+// --- cmdLineFilter tests ---
+
+func collectCmdFilter(f *cmdLineFilter, deltas ...string) string {
+	var got []string
+	// patch delegate to collect
+	orig := f.delegate
+	f.delegate = func(s string) { got = append(got, s); orig(s) }
+	for _, d := range deltas {
+		f.Write(d)
+	}
+	f.Flush()
+	combined := ""
+	for _, s := range got {
+		combined += s
+	}
+	return combined
+}
+
+func TestCmdLineFilter_PureProse(t *testing.T) {
+	var out []string
+	f := &cmdLineFilter{delegate: func(s string) { out = append(out, s) }}
+	f.Write("Hello world\nMore text\n")
+	f.Flush()
+	combined := ""
+	for _, s := range out {
+		combined += s
+	}
+	if combined != "Hello world\nMore text\n" {
+		t.Errorf("got %q, want %q", combined, "Hello world\nMore text\n")
+	}
+}
+
+func TestCmdLineFilter_SingleCmdLineSuppressed(t *testing.T) {
+	var out []string
+	f := &cmdLineFilter{delegate: func(s string) { out = append(out, s) }}
+	f.Write("before\n§ flicknote get abc\nafter\n")
+	f.Flush()
+	combined := ""
+	for _, s := range out {
+		combined += s
+	}
+	if combined != "before\nafter\n" {
+		t.Errorf("got %q, want %q", combined, "before\nafter\n")
+	}
+}
+
+func TestCmdLineFilter_CmdLineSplitAcrossDeltas(t *testing.T) {
+	var out []string
+	f := &cmdLineFilter{delegate: func(s string) { out = append(out, s) }}
+	f.Write("text\n§")
+	f.Write(" flicknote get abc\nmore text")
+	f.Flush()
+	combined := ""
+	for _, s := range out {
+		combined += s
+	}
+	if combined != "text\nmore text" {
+		t.Errorf("got %q, want %q", combined, "text\nmore text")
+	}
+}
+
+func TestCmdLineFilter_PrefixBuffering(t *testing.T) {
+	// delta is just "§" (2 bytes, less than CommandPrefix length of 3)
+	// — stays buffered, not emitted until more data arrives
+	var out []string
+	f := &cmdLineFilter{delegate: func(s string) { out = append(out, s) }}
+	f.Write("§")
+	// no flush yet — nothing should be emitted
+	if len(out) != 0 {
+		t.Errorf("expected no output before flush, got %v", out)
+	}
+	// completing a non-command line
+	f.Write("X regular text\n")
+	f.Flush()
+	combined := ""
+	for _, s := range out {
+		combined += s
+	}
+	if combined != "§X regular text\n" {
+		t.Errorf("got %q, want %q", combined, "§X regular text\n")
+	}
+}
+
+func TestCmdLineFilter_MultipleCmdLinesSuppressed(t *testing.T) {
+	var out []string
+	f := &cmdLineFilter{delegate: func(s string) { out = append(out, s) }}
+	f.Write("§ cmd1\n§ cmd2\n§ cmd3\n")
+	f.Flush()
+	if len(out) != 0 {
+		t.Errorf("expected no output, got %v", out)
+	}
+}
+
+func TestCmdLineFilter_FlushWithPartialCmdLine(t *testing.T) {
+	// Stream ends mid § line — should be suppressed
+	var out []string
+	f := &cmdLineFilter{delegate: func(s string) { out = append(out, s) }}
+	f.Write("§ flicknote get")
+	f.Flush()
+	if len(out) != 0 {
+		t.Errorf("expected no output for partial § line, got %v", out)
+	}
+}
+
+func TestCmdLineFilter_FlushWithPartialNonCmdLine(t *testing.T) {
+	// Stream ends mid non-§ line — should be emitted
+	var out []string
+	f := &cmdLineFilter{delegate: func(s string) { out = append(out, s) }}
+	f.Write("partial line without newline")
+	f.Flush()
+	combined := ""
+	for _, s := range out {
+		combined += s
+	}
+	if combined != "partial line without newline" {
+		t.Errorf("got %q, want %q", combined, "partial line without newline")
+	}
+}
+
+func TestCmdLineFilter_CmdLineAtStartOfTurn(t *testing.T) {
+	// § line at start with no preceding \n — still suppressed
+	var out []string
+	f := &cmdLineFilter{delegate: func(s string) { out = append(out, s) }}
+	f.Write("§ ls -la\nresult text\n")
+	f.Flush()
+	combined := ""
+	for _, s := range out {
+		combined += s
+	}
+	if combined != "result text\n" {
+		t.Errorf("got %q, want %q", combined, "result text\n")
+	}
+}
+
+func TestCmdLineFilter_InteractionWithXMLFilter(t *testing.T) {
+	// § lines suppressed, XML markers trigger xmlDetected on inner filter
+	var delegateOut []string
+	xmlFilter := &streamFilter{delegate: func(s string) { delegateOut = append(delegateOut, s) }}
+	cmdFilter := &cmdLineFilter{delegate: xmlFilter.Write}
+
+	cmdFilter.Write("prose text\n§ some command\n<tool_call>bad</tool_call>")
+	cmdFilter.Flush()
+	xmlFilter.Flush()
+
+	combined := ""
+	for _, s := range delegateOut {
+		combined += s
+	}
+	if combined != "prose text\n" {
+		t.Errorf("got %q, want %q", combined, "prose text\n")
+	}
+	if !xmlFilter.xmlDetected {
+		t.Error("xmlDetected should be true")
+	}
+}

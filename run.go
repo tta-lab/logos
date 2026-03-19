@@ -466,6 +466,78 @@ func hasPrefixInSlice(s string, markers []string) bool {
 	return false
 }
 
+// cmdLineFilter buffers streaming text at line boundaries to suppress § command
+// lines before they reach the delegate. Non-command text passes through immediately
+// once the line prefix is determined.
+//
+// The § prefix (CommandPrefix from parse.go) is 3 bytes in UTF-8 (§ = 0xC2A7, then
+// space = 0x20). We buffer at most the first few bytes of each line to make the decision.
+type cmdLineFilter struct {
+	delegate    func(string) // receives non-command text (typically streamFilter.Write)
+	lineBuf     strings.Builder
+	suppressing bool // true once current line confirmed as § command
+}
+
+// Write processes a streaming delta, suppressing § command lines.
+func (f *cmdLineFilter) Write(delta string) {
+	for i := 0; i < len(delta); {
+		if f.suppressing {
+			// Scan for newline to end suppression of current § line.
+			nl := strings.IndexByte(delta[i:], '\n')
+			if nl == -1 {
+				return // rest of delta is still the suppressed line
+			}
+			// Newline found — § line is done. Don't emit the \n either.
+			f.suppressing = false
+			f.lineBuf.Reset()
+			i += nl + 1
+			continue
+		}
+
+		nl := strings.IndexByte(delta[i:], '\n')
+		if nl == -1 {
+			// No newline — buffer remainder for prefix check.
+			f.lineBuf.WriteString(delta[i:])
+			// Check if we can already determine the line type.
+			if f.lineBuf.Len() >= len(CommandPrefix) {
+				if strings.HasPrefix(f.lineBuf.String(), CommandPrefix) {
+					f.suppressing = true
+					f.lineBuf.Reset()
+				} else {
+					// Not a command — flush buffer to delegate.
+					f.delegate(f.lineBuf.String())
+					f.lineBuf.Reset()
+				}
+			}
+			return
+		}
+
+		// Newline found at position nl (relative to delta[i:]).
+		line := delta[i : i+nl]
+		f.lineBuf.WriteString(line)
+		fullLine := f.lineBuf.String()
+
+		if strings.HasPrefix(fullLine, CommandPrefix) {
+			// Suppress entire line including \n.
+		} else {
+			f.delegate(fullLine + "\n")
+		}
+		f.lineBuf.Reset()
+		f.suppressing = false
+		i += nl + 1
+	}
+}
+
+// Flush emits any buffered partial line that isn't a § command.
+// Called when the stream ends (deferred in streamOneTurn).
+func (f *cmdLineFilter) Flush() {
+	if f.lineBuf.Len() > 0 && !strings.HasPrefix(f.lineBuf.String(), CommandPrefix) {
+		f.delegate(f.lineBuf.String())
+	}
+	f.lineBuf.Reset()
+	f.suppressing = false
+}
+
 // streamOneTurn streams a single LLM response (no tools).
 // Returns the full unfiltered text, whether XML was detected, and any error.
 // The filter suppresses XML tool_call output from OnDelta and strips think tags.
@@ -485,21 +557,25 @@ func streamOneTurn(
 		return "", false, err
 	}
 
-	filter := &streamFilter{delegate: onDelta}
-	defer filter.Flush()
+	xmlFilter := &streamFilter{delegate: onDelta}
+	cmdFilter := &cmdLineFilter{delegate: xmlFilter.Write}
+	// Order matters: cmdFilter.Flush() must run BEFORE xmlFilter.Flush().
+	// cmdFilter.Flush() may emit a buffered partial line to xmlFilter.Write,
+	// so xmlFilter must still be accepting input. If reversed, that content is lost.
+	defer func() { cmdFilter.Flush(); xmlFilter.Flush() }()
 	var fullText strings.Builder
 	for part := range stream {
 		switch part.Type {
 		case fantasy.StreamPartTypeTextDelta:
 			fullText.WriteString(part.Delta)
-			filter.Write(part.Delta)
+			cmdFilter.Write(part.Delta)
 		case fantasy.StreamPartTypeError:
 			if part.Error != nil {
-				return fullText.String(), filter.xmlDetected, part.Error
+				return fullText.String(), xmlFilter.xmlDetected, part.Error
 			}
 		}
 	}
-	return fullText.String(), filter.xmlDetected, nil
+	return fullText.String(), xmlFilter.xmlDetected, nil
 }
 
 // newAssistantMessage wraps text as a fantasy assistant message.
