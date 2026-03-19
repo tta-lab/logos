@@ -3,12 +3,10 @@ module github.com/tta-lab/logos
 go 1.26.1
 
 require (
-	charm.land/fantasy v0.12.3
+	charm.land/fantasy v0.15.0
 	github.com/stretchr/testify v1.11.1
 	github.com/tta-lab/temenos v0.2.1
 )
-
-replace charm.land/fantasy => github.com/tta-lab/fantasy v0.14.1-ttal
 
 require (
 	github.com/charmbracelet/x/exp/slice v0.0.0-20250904123553-b4e2667e5ad5 // indirect

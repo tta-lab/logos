@@ -3,16 +3,16 @@ package logos
 import "strings"
 
 // CommandPrefix is the prefix for agent commands in LLM output.
-const CommandPrefix = "! "
+const CommandPrefix = "§ "
 
-// Command represents a parsed ! command from assistant output.
+// Command represents a parsed § command from assistant output.
 type Command struct {
-	Raw  string // full original line (e.g. "! ls -la")
-	Args string // everything after "! " (e.g. "ls -la")
+	Raw  string // full original line (e.g. "§ ls -la")
+	Args string // everything after "§ " (e.g. "ls -la")
 }
 
-// ParseCommand checks if a line is a ! command.
-// Returns the command and true if the line starts with "! ".
+// ParseCommand checks if a line is a § command.
+// Returns the command and true if the line starts with "§ ".
 // Returns zero Command and false otherwise.
 func ParseCommand(line string) (Command, bool) {
 	trimmed := strings.TrimSpace(line)

@@ -56,7 +56,7 @@ func TestContainsXMLToolCall(t *testing.T) {
 		{"closing function_call tag", "</function_call>", false}, // bare closing tag — not a marker
 		{"function_call with attributes", "<function_call name=\"foo\">", true},
 		{"minimax closing tag", "</minimax:tool_call>", true},
-		{"normal bang cmd", "! ls -la\nsome output", false},
+		{"normal § cmd", "§ ls -la\nsome output", false},
 		{"plain text", "Here is the answer to your question.", false},
 		{"invoke in prose", "We invoke the function by calling...", false},
 		{"closing invoke in prose", "The </invoke> tag closes the block.", false}, // not a marker
@@ -77,18 +77,18 @@ func TestParseCommand(t *testing.T) {
 		wantArgs string
 		wantOK   bool
 	}{
-		{"! ls -la", "ls -la", true},
-		{"! rg 'pattern' /dir", "rg 'pattern' /dir", true},
-		{"! logos read /path/to/file.go", "logos read /path/to/file.go", true},
-		{"! logos search \"golang context\"", "logos search \"golang context\"", true},
-		{"  ! ls", "ls", true},    // leading whitespace OK
+		{"§ ls -la", "ls -la", true},
+		{"§ rg 'pattern' /dir", "rg 'pattern' /dir", true},
+		{"§ logos read /path/to/file.go", "logos read /path/to/file.go", true},
+		{"§ logos search \"golang context\"", "logos search \"golang context\"", true},
+		{"  § ls", "ls", true},    // leading whitespace OK
 		{"!", "", false},          // just bang, no space
-		{"! ", "", false},         // bang + space, no command
-		{"echo hello", "", false}, // no ! prefix
+		{"§ ", "", false},         // section sign + space, no command
+		{"echo hello", "", false}, // no § prefix
 		{"", "", false},           // empty
-		{"# ! ls", "", false},     // commented out
-		{"!ls", "", false},        // no space after !
-		// Old prefix must NOT be parsed as command
+		{"# § ls", "", false},     // commented out
+		{"§ls", "", false},        // no space after §
+		// Old prefixes must NOT be parsed as command
 		{"$ ls -la", "", false},     // old dollar prefix no longer recognized
 		{"$ rg pattern", "", false}, // old dollar prefix no longer recognized
 	}
