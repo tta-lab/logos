@@ -489,7 +489,6 @@ func (f *cmdLineFilter) Write(delta string) {
 			}
 			// Newline found — § line is done. Don't emit the \n either.
 			f.suppressing = false
-			f.lineBuf.Reset()
 			i += nl + 1
 			continue
 		}
@@ -499,15 +498,16 @@ func (f *cmdLineFilter) Write(delta string) {
 			// No newline — buffer remainder for prefix check.
 			f.lineBuf.WriteString(delta[i:])
 			// Check if we can already determine the line type.
-			if f.lineBuf.Len() >= len(CommandPrefix) {
-				if strings.HasPrefix(f.lineBuf.String(), CommandPrefix) {
-					f.suppressing = true
-					f.lineBuf.Reset()
-				} else {
-					// Not a command — flush buffer to delegate.
-					f.delegate(f.lineBuf.String())
-					f.lineBuf.Reset()
-				}
+			// Trim leading whitespace (matching ParseCommand behaviour) and only
+			// decide once the trimmed content is long enough to be unambiguous.
+			trimmed := strings.TrimSpace(f.lineBuf.String())
+			if strings.HasPrefix(trimmed, CommandPrefix) {
+				f.suppressing = true
+				f.lineBuf.Reset()
+			} else if len(trimmed) >= len(CommandPrefix) {
+				// Trimmed content is long enough and not a command — flush buffer to delegate.
+				f.delegate(f.lineBuf.String())
+				f.lineBuf.Reset()
 			}
 			return
 		}
@@ -517,7 +517,7 @@ func (f *cmdLineFilter) Write(delta string) {
 		f.lineBuf.WriteString(line)
 		fullLine := f.lineBuf.String()
 
-		if strings.HasPrefix(fullLine, CommandPrefix) {
+		if strings.HasPrefix(strings.TrimSpace(fullLine), CommandPrefix) {
 			// Suppress entire line including \n.
 		} else {
 			f.delegate(fullLine + "\n")
@@ -531,7 +531,7 @@ func (f *cmdLineFilter) Write(delta string) {
 // Flush emits any buffered partial line that isn't a § command.
 // Called when the stream ends (deferred in streamOneTurn).
 func (f *cmdLineFilter) Flush() {
-	if f.lineBuf.Len() > 0 && !strings.HasPrefix(f.lineBuf.String(), CommandPrefix) {
+	if f.lineBuf.Len() > 0 && !strings.HasPrefix(strings.TrimSpace(f.lineBuf.String()), CommandPrefix) {
 		f.delegate(f.lineBuf.String())
 	}
 	f.lineBuf.Reset()

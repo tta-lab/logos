@@ -410,6 +410,21 @@ func TestCmdLineFilter_CmdLineAtStartOfTurn(t *testing.T) {
 	}
 }
 
+func TestCmdLineFilter_LeadingSpaceCmdLineSuppressed(t *testing.T) {
+	// Models occasionally indent § lines — should still be suppressed (matching ParseCommand).
+	var out []string
+	f := &cmdLineFilter{delegate: func(s string) { out = append(out, s) }}
+	f.Write("prose\n  § indented-cmd\nafter\n")
+	f.Flush()
+	combined := ""
+	for _, s := range out {
+		combined += s
+	}
+	if combined != "prose\nafter\n" {
+		t.Errorf("got %q, want %q", combined, "prose\nafter\n")
+	}
+}
+
 func TestCmdLineFilter_InteractionWithXMLFilter(t *testing.T) {
 	// § lines suppressed, XML markers trigger xmlDetected on inner filter
 	var delegateOut []string
