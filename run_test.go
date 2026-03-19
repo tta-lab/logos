@@ -425,6 +425,129 @@ func TestCmdLineFilter_LeadingSpaceCmdLineSuppressed(t *testing.T) {
 	}
 }
 
+// --- cmdLineFilter heredoc suppression tests ---
+
+func TestCmdLineFilter_SimpleHeredoc(t *testing.T) {
+	// § command with heredoc: body and closing delimiter suppressed, prose after passes through.
+	var out []string
+	f := &cmdLineFilter{delegate: func(s string) { out = append(out, s) }}
+	f.Write("§ cat <<'EOF' | flicknote add\nline1\nline2\nEOF\nProse after\n")
+	f.Flush()
+	combined := ""
+	for _, s := range out {
+		combined += s
+	}
+	if combined != "Prose after\n" {
+		t.Errorf("got %q, want %q", combined, "Prose after\n")
+	}
+}
+
+func TestCmdLineFilter_HeredocBodySplitAcrossDeltas(t *testing.T) {
+	// Delimiter arrives in first delta, body and close in subsequent deltas.
+	var out []string
+	f := &cmdLineFilter{delegate: func(s string) { out = append(out, s) }}
+	f.Write("§ cat <<'EOF' | flicknote add\n")
+	f.Write("body line one\n")
+	f.Write("body line two\n")
+	f.Write("EOF\n")
+	f.Write("Prose after\n")
+	f.Flush()
+	combined := ""
+	for _, s := range out {
+		combined += s
+	}
+	if combined != "Prose after\n" {
+		t.Errorf("got %q, want %q", combined, "Prose after\n")
+	}
+}
+
+func TestCmdLineFilter_HeredocDashVariant(t *testing.T) {
+	// <<- heredoc with tab-indented closing delimiter is detected correctly.
+	var out []string
+	f := &cmdLineFilter{delegate: func(s string) { out = append(out, s) }}
+	f.Write("§ cat <<-'END'\n\tbody content\n\tEND\nAfter prose\n")
+	f.Flush()
+	combined := ""
+	for _, s := range out {
+		combined += s
+	}
+	if combined != "After prose\n" {
+		t.Errorf("got %q, want %q", combined, "After prose\n")
+	}
+}
+
+func TestCmdLineFilter_HeredocUnquoted(t *testing.T) {
+	// Unquoted <<EOF delimiter extraction works.
+	var out []string
+	f := &cmdLineFilter{delegate: func(s string) { out = append(out, s) }}
+	f.Write("§ cat <<EOF | cmd\nbody\nEOF\nResult\n")
+	f.Flush()
+	combined := ""
+	for _, s := range out {
+		combined += s
+	}
+	if combined != "Result\n" {
+		t.Errorf("got %q, want %q", combined, "Result\n")
+	}
+}
+
+func TestCmdLineFilter_MultipleHeredocsInSequence(t *testing.T) {
+	// Two heredocs in sequence: both suppressed, prose between and after passes through.
+	var out []string
+	f := &cmdLineFilter{delegate: func(s string) { out = append(out, s) }}
+	f.Write("Before\n§ cat <<'EOF'\nbody1\nEOF\nMiddle\n§ cat <<'END'\nbody2\nEND\nAfter\n")
+	f.Flush()
+	combined := ""
+	for _, s := range out {
+		combined += s
+	}
+	if combined != "Before\nMiddle\nAfter\n" {
+		t.Errorf("got %q, want %q", combined, "Before\nMiddle\nAfter\n")
+	}
+}
+
+func TestCmdLineFilter_NoHeredocUnchanged(t *testing.T) {
+	// § line without heredoc: single line suppression unchanged.
+	var out []string
+	f := &cmdLineFilter{delegate: func(s string) { out = append(out, s) }}
+	f.Write("prose\n§ simple-cmd\nafter\n")
+	f.Flush()
+	combined := ""
+	for _, s := range out {
+		combined += s
+	}
+	if combined != "prose\nafter\n" {
+		t.Errorf("got %q, want %q", combined, "prose\nafter\n")
+	}
+}
+
+func TestCmdLineFilter_HeredocAtEndOfStream(t *testing.T) {
+	// Stream ends inside heredoc body — Flush suppresses partial content.
+	var out []string
+	f := &cmdLineFilter{delegate: func(s string) { out = append(out, s) }}
+	f.Write("§ cat <<'EOF'\nbody line\n")
+	// No EOF closer — stream ends.
+	f.Flush()
+	if len(out) != 0 {
+		t.Errorf("expected no output for unterminated heredoc, got %v", out)
+	}
+}
+
+func TestCmdLineFilter_ProseAfterHeredocNotEaten(t *testing.T) {
+	// Explicitly verify suppressing flag doesn't leak past heredoc close.
+	var out []string
+	f := &cmdLineFilter{delegate: func(s string) { out = append(out, s) }}
+	f.Write("§ cat <<'EOF' | cmd\nbody\nEOF\nThis must appear\n")
+	f.Flush()
+	combined := ""
+	for _, s := range out {
+		combined += s
+	}
+	if combined != "This must appear\n" {
+		t.Errorf("got %q, want %q", combined, "This must appear\n")
+	}
+}
+
 func TestCmdLineFilter_InteractionWithXMLFilter(t *testing.T) {
 	// § lines suppressed, XML markers trigger xmlDetected on inner filter
 	var delegateOut []string
