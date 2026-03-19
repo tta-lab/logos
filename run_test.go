@@ -294,22 +294,6 @@ func TestStreamFilter_Mixed_ThinkAndText(t *testing.T) {
 
 // --- cmdLineFilter tests ---
 
-func collectCmdFilter(f *cmdLineFilter, deltas ...string) string {
-	var got []string
-	// patch delegate to collect
-	orig := f.delegate
-	f.delegate = func(s string) { got = append(got, s); orig(s) }
-	for _, d := range deltas {
-		f.Write(d)
-	}
-	f.Flush()
-	combined := ""
-	for _, s := range got {
-		combined += s
-	}
-	return combined
-}
-
 func TestCmdLineFilter_PureProse(t *testing.T) {
 	var out []string
 	f := &cmdLineFilter{delegate: func(s string) { out = append(out, s) }}
