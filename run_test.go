@@ -1,6 +1,7 @@
 package logos
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -178,7 +179,7 @@ func TestStreamFilter_FastPath_NoAngle(t *testing.T) {
 	if len(got) != 1 || got[0] != "hello world" {
 		t.Errorf("got %v, want [hello world]", got)
 	}
-	if f.xmlDetected {
+	if f.toolCallDetected {
 		t.Error("xmlDetected should be false")
 	}
 }
@@ -191,7 +192,7 @@ func TestStreamFilter_Tier1_XMLToolCall(t *testing.T) {
 	if len(got) != 0 {
 		t.Errorf("expected no output, got %v", got)
 	}
-	if !f.xmlDetected {
+	if !f.toolCallDetected {
 		t.Error("xmlDetected should be true")
 	}
 }
@@ -205,7 +206,7 @@ func TestStreamFilter_Tier1_SplitAcrossDeltas(t *testing.T) {
 	if len(got) != 0 {
 		t.Errorf("expected no output, got %v", got)
 	}
-	if !f.xmlDetected {
+	if !f.toolCallDetected {
 		t.Error("xmlDetected should be true")
 	}
 }
@@ -222,7 +223,7 @@ func TestStreamFilter_Tier2_ThinkTagStripped(t *testing.T) {
 	if combined != "Here is the result" {
 		t.Errorf("got %q, want %q", combined, "Here is the result")
 	}
-	if f.xmlDetected {
+	if f.toolCallDetected {
 		t.Error("xmlDetected should be false for think tag")
 	}
 }
@@ -240,7 +241,7 @@ func TestStreamFilter_Tier2_ThinkTagSplit(t *testing.T) {
 	if combined != "result" {
 		t.Errorf("got %q, want %q", combined, "result")
 	}
-	if f.xmlDetected {
+	if f.toolCallDetected {
 		t.Error("xmlDetected should be false")
 	}
 }
@@ -257,7 +258,7 @@ func TestStreamFilter_HarmlessAngle_NotDetected(t *testing.T) {
 	if combined != "<p>some content</p>" {
 		t.Errorf("got %q, want %q", combined, "<p>some content</p>")
 	}
-	if f.xmlDetected {
+	if f.toolCallDetected {
 		t.Error("xmlDetected should be false")
 	}
 }
@@ -583,7 +584,7 @@ func TestCmdLineFilter_ProseAfterHeredocNotEaten(t *testing.T) {
 }
 
 func TestCmdLineFilter_InteractionWithXMLFilter(t *testing.T) {
-	// § lines suppressed, XML markers trigger xmlDetected on inner filter
+	// § lines suppressed, XML markers trigger toolCallDetected on inner filter
 	var delegateOut []string
 	xmlFilter := &streamFilter{delegate: func(s string) { delegateOut = append(delegateOut, s) }}
 	cmdFilter := &cmdLineFilter{delegate: xmlFilter.Write}
@@ -599,7 +600,118 @@ func TestCmdLineFilter_InteractionWithXMLFilter(t *testing.T) {
 	if combined != "prose text\n" {
 		t.Errorf("got %q, want %q", combined, "prose text\n")
 	}
-	if !xmlFilter.xmlDetected {
-		t.Error("xmlDetected should be true")
+	if !xmlFilter.toolCallDetected {
+		t.Error("toolCallDetected should be true")
+	}
+}
+
+func TestStreamFilter_BracketToolCall(t *testing.T) {
+	var got []string
+	f := &streamFilter{delegate: func(s string) { got = append(got, s) }}
+	f.Write("[TOOL_CALL]{tool => 'shell', args => { --command 'ls' }}[/TOOL_CALL]")
+	f.Flush()
+	if len(got) != 0 {
+		t.Errorf("expected no output, got %v", got)
+	}
+	if !f.toolCallDetected {
+		t.Error("toolCallDetected should be true")
+	}
+}
+
+func TestStreamFilter_BracketToolCall_CaseInsensitive(t *testing.T) {
+	var got []string
+	f := &streamFilter{delegate: func(s string) { got = append(got, s) }}
+	f.Write("[tool_call]some content[/tool_call]")
+	f.Flush()
+	if len(got) != 0 {
+		t.Errorf("expected no output, got %v", got)
+	}
+	if !f.toolCallDetected {
+		t.Error("toolCallDetected should be true for lowercase bracket")
+	}
+}
+
+func TestStreamFilter_BracketToolCall_SplitAcrossDeltas(t *testing.T) {
+	var got []string
+	f := &streamFilter{delegate: func(s string) { got = append(got, s) }}
+	f.Write("[TOOL_")
+	f.Write("CALL]")
+	f.Flush()
+	if len(got) != 0 {
+		t.Errorf("expected no output, got %v", got)
+	}
+	if !f.toolCallDetected {
+		t.Error("toolCallDetected should be true for split bracket marker")
+	}
+}
+
+func TestStreamFilter_HarmlessBracket_NotDetected(t *testing.T) {
+	var got []string
+	f := &streamFilter{delegate: func(s string) { got = append(got, s) }}
+	f.Write("[some content]")
+	f.Flush()
+	combined := ""
+	for _, s := range got {
+		combined += s
+	}
+	if combined != "[some content]" {
+		t.Errorf("got %q, want %q", combined, "[some content]")
+	}
+	if f.toolCallDetected {
+		t.Error("toolCallDetected should be false for harmless bracket")
+	}
+}
+
+func TestStreamFilter_TextBeforeBracketToolCall(t *testing.T) {
+	var got []string
+	f := &streamFilter{delegate: func(s string) { got = append(got, s) }}
+	f.Write("some text before [TOOL_CALL]bad[/TOOL_CALL]")
+	f.Flush()
+	combined := ""
+	for _, s := range got {
+		combined += s
+	}
+	if combined != "some text before " {
+		t.Errorf("got %q, want %q", combined, "some text before ")
+	}
+	if !f.toolCallDetected {
+		t.Error("toolCallDetected should be true")
+	}
+}
+
+func TestCmdLineFilter_InteractionWithBracketFilter(t *testing.T) {
+	// § lines suppressed, bracket markers trigger toolCallDetected on inner filter
+	var delegateOut []string
+	xmlFilter := &streamFilter{delegate: func(s string) { delegateOut = append(delegateOut, s) }}
+	cmdFilter := &cmdLineFilter{delegate: xmlFilter.Write}
+
+	cmdFilter.Write("prose text\n§ some command\n[TOOL_CALL]{bad}[/TOOL_CALL]")
+	cmdFilter.Flush()
+	xmlFilter.Flush()
+
+	combined := ""
+	for _, s := range delegateOut {
+		combined += s
+	}
+	if combined != "prose text\n" {
+		t.Errorf("got %q, want %q", combined, "prose text\n")
+	}
+	if !xmlFilter.toolCallDetected {
+		t.Error("toolCallDetected should be true for bracket marker")
+	}
+}
+
+func TestHallucinationDirective(t *testing.T) {
+	d1 := hallucinationDirective(1)
+	if !strings.Contains(d1, "Unprocessed") {
+		t.Errorf("attempt 1 directive should contain 'Unprocessed', got: %q", d1)
+	}
+	d2 := hallucinationDirective(2)
+	if !strings.Contains(d2, "attempt 2") {
+		t.Errorf("attempt 2 directive should contain 'attempt 2', got: %q", d2)
+	}
+	d3 := hallucinationDirective(3)
+	if !strings.Contains(d3, "attempt 3") {
+		t.Errorf("attempt 3 directive should contain 'attempt 3', got: %q", d3)
 	}
 }

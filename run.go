@@ -27,9 +27,9 @@ const DefaultMaxSteps = 30
 // DefaultMaxTokens is the fallback max output tokens when Config.MaxTokens is 0.
 const DefaultMaxTokens = 16384
 
-// SoftWarningThreshold is the number of consecutive command-only turns
-// before the loop injects a nudge asking the agent to explain progress.
-const SoftWarningThreshold = 10
+// MaxHallucinationRetries is the maximum number of tool call hallucination retries
+// before Run() returns an error.
+const MaxHallucinationRetries = 3
 
 // Re-exported from temenos/client so consumers don't import temenos directly.
 type (
@@ -86,8 +86,8 @@ type Callbacks struct {
 	// exitCode is -1 if the sandbox itself failed to execute the command (temenos
 	// transport error), in which case output contains the error description.
 	OnCommandResult func(command string, output string, exitCode int)
-	// OnRetry is called when XML tool_call output is detected and a directive is
-	// injected. reason is "xml_tool_call". step is the current step number.
+	// OnRetry is called when a tool call hallucination (XML or bracket) is detected
+	// and an "unprocessed" directive is injected. reason is "tool_call".
 	OnRetry func(reason string, step int)
 }
 
@@ -128,13 +128,13 @@ func Run(
 	messages = append(messages, fantasy.NewUserMessage(prompt))
 
 	var (
-		steps               []StepMessage
-		responseText        strings.Builder
-		consecutiveCmdTurns int // consecutive turns where agent ran commands without text-only response
+		steps              []StepMessage
+		responseText       strings.Builder
+		hallucinationCount int
 	)
 
 	for step := 0; step < maxSteps; step++ {
-		fullText, xmlDetected, streamErr := streamOneTurn(ctx, model, messages, maxTokens, func(text string) {
+		fullText, toolCallDetected, streamErr := streamOneTurn(ctx, model, messages, maxTokens, func(text string) {
 			if cbs.OnDelta != nil {
 				cbs.OnDelta(text)
 			}
@@ -143,17 +143,20 @@ func Run(
 			return nil, fmt.Errorf("stream turn %d: %w", step, streamErr)
 		}
 
-		// Check XML BEFORE appending to Steps — don't expose XML garbage to consumers.
-		if xmlDetected {
-			directive := "(Your previous output was rejected — XML tool calls are not supported. " +
-				"To run a command, write a line starting with § e.g. § ls -la)"
-			slog.Warn("XML tool_call detected, injecting directive", "step", step)
-			if cbs.OnRetry != nil {
-				cbs.OnRetry("xml_tool_call", step)
+		// Check tool call hallucination BEFORE appending to Steps.
+		if toolCallDetected {
+			hallucinationCount++
+			if hallucinationCount > MaxHallucinationRetries {
+				return nil, fmt.Errorf("logos: tool call hallucination not resolved after %d retries", MaxHallucinationRetries)
 			}
-			// Only add directive to Steps — skip the XML assistant message entirely.
+			directive := hallucinationDirective(hallucinationCount)
+			slog.Warn("tool call hallucination detected", "step", step, "attempt", hallucinationCount)
+			if cbs.OnRetry != nil {
+				cbs.OnRetry("tool_call", step)
+			}
+			// Record both the wrong output and feedback in Steps (for conversation restore).
+			steps = append(steps, StepMessage{Role: StepRoleAssistant, Content: fullText, Timestamp: time.Now()})
 			steps = append(steps, StepMessage{Role: StepRoleResult, Content: directive, Timestamp: time.Now()})
-			// Add both to messages: model needs to see its mistake + directive.
 			messages = append(messages, newAssistantMessage(fullText), fantasy.NewUserMessage(directive))
 			continue
 		}
@@ -171,8 +174,6 @@ func Run(
 		steps = append(steps, StepMessage{Role: StepRoleCommand, Content: fullText, Timestamp: time.Now().UTC()})
 		responseText.WriteString(preText)
 
-		consecutiveCmdTurns++
-
 		// Execute each command via runAndNotify (fires OnCommandResult callback),
 		// then format output for LLM with exit code suffix.
 		userContent := strings.Join(executeCommands(ctx, cfg, cbs, cmds), "\n")
@@ -180,16 +181,6 @@ func Run(
 			// ctx was already cancelled before any command ran; next streamOneTurn will
 			// return the context error and propagate it cleanly.
 			continue
-		}
-
-		// Soft warning — append to command output to avoid consecutive user messages,
-		// which some LLM providers reject.
-		if consecutiveCmdTurns == SoftWarningThreshold {
-			userContent += fmt.Sprintf(
-				"\n\nNote: You have run %d command turns without explaining your progress. "+
-					"Include a brief summary of what you've found before your next command.",
-				consecutiveCmdTurns,
-			)
 		}
 
 		steps = append(steps, StepMessage{Role: StepRoleResult, Content: userContent, Timestamp: time.Now().UTC()})
@@ -200,6 +191,19 @@ func Run(
 		Response: responseText.String(),
 		Steps:    steps,
 	}, fmt.Errorf("logos: max steps (%d) reached", maxSteps)
+}
+
+// hallucinationDirective returns a directive message for the model after detecting
+// a tool call hallucination. Escalates in urgency on repeated attempts.
+func hallucinationDirective(attempt int) string {
+	if attempt <= 1 {
+		return "(Unprocessed: your output contained a tool call format that is not supported. " +
+			"This environment has no tool/function calling API. " +
+			"To run a command, write a plain-text line starting with § — e.g. § ls -la)"
+	}
+	return fmt.Sprintf("(Unprocessed: tool call format detected again (attempt %d). "+
+		"There is NO tool calling API. The ONLY way to run commands is a line starting with § prefix. "+
+		"Do NOT use any XML tags, bracket wrappers, or structured format. Example:\n§ ls -la\n§ cat file.go)", attempt)
 }
 
 // runAndNotify executes a command and fires OnCommandResult.
@@ -362,23 +366,25 @@ func scanAllCommands(text string) (preText string, cmds []Command) {
 }
 
 // streamFilter sits between the LLM stream and OnDelta, filtering XML tool_call
-// markers (suppress + retry) and strip markers like </think> (tag-only removal —
-// inter-tag content is passed through unchanged).
+// markers (suppress + retry), bracket tool_call markers (suppress + retry), and
+// strip markers like </think> (tag-only removal — inter-tag content is passed through unchanged).
 type streamFilter struct {
-	delegate    func(string)
-	buf         strings.Builder
-	buffering   bool
-	xmlDetected bool
+	delegate         func(string)
+	buf              strings.Builder
+	buffering        bool
+	toolCallDetected bool
 }
 
-// Write processes a streaming delta. Fast path: no '<' → pass through immediately.
-// Otherwise buffers from the first '<' and checks for known markers.
+// Write processes a streaming delta. Fast path: no '<' or '[' → pass through immediately.
+// Otherwise buffers from the first trigger character and checks for known markers.
 func (f *streamFilter) Write(delta string) {
-	if f.xmlDetected {
+	if f.toolCallDetected {
 		return
 	}
 	if !f.buffering {
-		idx := strings.IndexByte(delta, '<')
+		idxLT := strings.IndexByte(delta, '<')
+		idxBR := strings.IndexByte(delta, '[')
+		idx := firstNonNeg(idxLT, idxBR)
 		if idx == -1 {
 			f.delegate(delta)
 			return
@@ -396,18 +402,42 @@ func (f *streamFilter) Write(delta string) {
 	f.checkBuffer()
 }
 
+// firstNonNeg returns the smaller of two non-negative integers, or the other
+// if one is negative. Returns -1 if both are negative.
+func firstNonNeg(a, b int) int {
+	switch {
+	case a < 0:
+		return b
+	case b < 0:
+		return a
+	default:
+		if a < b {
+			return a
+		}
+		return b
+	}
+}
+
 // checkBuffer inspects the current buffer for known markers and acts accordingly.
 func (f *streamFilter) checkBuffer() {
 	bufStr := f.buf.String()
 
-	// Tier 1: XML tool_call — suppress entire stream, signal retry.
+	// Tier 1a: XML tool_call — suppress entire stream, signal retry.
 	for _, marker := range xmlToolCallMarkers {
 		if strings.Contains(bufStr, marker) {
-			f.xmlDetected = true
+			f.toolCallDetected = true
 			f.buf.Reset()
 			f.buffering = false
 			return
 		}
+	}
+
+	// Tier 1b: Bracket tool_call (case-insensitive) — same suppression.
+	if containsBracketToolCall(bufStr) {
+		f.toolCallDetected = true
+		f.buf.Reset()
+		f.buffering = false
+		return
 	}
 
 	// Tier 2: Strip markers — remove tag strings, flush surrounding text.
@@ -443,7 +473,7 @@ func (f *streamFilter) checkBuffer() {
 
 // Flush flushes any remaining buffered content when the stream ends.
 func (f *streamFilter) Flush() {
-	if f.buf.Len() > 0 && !f.xmlDetected {
+	if f.buf.Len() > 0 && !f.toolCallDetected {
 		f.delegate(f.buf.String())
 	}
 	f.buf.Reset()
@@ -451,9 +481,23 @@ func (f *streamFilter) Flush() {
 }
 
 // isPrefixOfAny returns true if s is a prefix of any known marker.
-// Used to determine whether to keep buffering when we see a partial '<' sequence.
+// Used to determine whether to keep buffering when we see a partial trigger sequence.
 func isPrefixOfAny(s string) bool {
-	return hasPrefixInSlice(s, xmlToolCallMarkers) || hasPrefixInSlice(s, stripMarkers)
+	return hasPrefixInSlice(s, xmlToolCallMarkers) ||
+		hasPrefixInSlice(s, stripMarkers) ||
+		hasPrefixInSliceFold(s, bracketToolCallMarkers)
+}
+
+// hasPrefixInSliceFold returns true if any marker in the slice starts with the
+// lowercase version of s. Used for case-insensitive bracket marker prefix matching.
+func hasPrefixInSliceFold(s string, markers []string) bool {
+	lower := strings.ToLower(s)
+	for _, marker := range markers {
+		if strings.HasPrefix(marker, lower) {
+			return true
+		}
+	}
+	return false
 }
 
 // hasPrefixInSlice returns true if any marker in the slice starts with s.
@@ -566,8 +610,8 @@ func (f *cmdLineFilter) Flush() {
 }
 
 // streamOneTurn streams a single LLM response (no tools).
-// Returns the full unfiltered text, whether XML was detected, and any error.
-// The filter suppresses XML tool_call output from OnDelta and strips think tags.
+// Returns the full unfiltered text, whether a tool call hallucination was detected, and any error.
+// The filter suppresses tool call output from OnDelta and strips think tags.
 // filter.Flush() is deferred so buffered content is always emitted, even on error.
 func streamOneTurn(
 	ctx context.Context,
@@ -598,11 +642,11 @@ func streamOneTurn(
 			cmdFilter.Write(part.Delta)
 		case fantasy.StreamPartTypeError:
 			if part.Error != nil {
-				return fullText.String(), xmlFilter.xmlDetected, part.Error
+				return fullText.String(), xmlFilter.toolCallDetected, part.Error
 			}
 		}
 	}
-	return fullText.String(), xmlFilter.xmlDetected, nil
+	return fullText.String(), xmlFilter.toolCallDetected, nil
 }
 
 // newAssistantMessage wraps text as a fantasy assistant message.

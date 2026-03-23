@@ -245,7 +245,7 @@ func TestRun_OnCommandResultCallback_TransportError(t *testing.T) {
 }
 
 func TestRun_XMLRetry_RecoversToCommand(t *testing.T) { //nolint:dupl
-	// Turn 1: model outputs XML (detected by streaming filter). Turn 2: corrects to ! command. Turn 3: done.
+	// Turn 1: model outputs XML (detected by streaming filter). Turn 2: corrects to § command. Turn 3: done.
 	model := &mockLanguageModel{responses: []string{
 		"<invoke name=\"rg\"><parameter name=\"pattern\">foo</parameter></invoke>",
 		"§ rg foo /path",
@@ -263,19 +263,20 @@ func TestRun_XMLRetry_RecoversToCommand(t *testing.T) { //nolint:dupl
 	assert.Contains(t, result.Response, "Found it.")
 	require.Len(t, runner.calls, 1) // command executed exactly once after recovery
 	assert.Equal(t, "rg foo /path", runner.calls[0].Command)
-	assert.Equal(t, []string{"xml_tool_call"}, retryCalls)
+	assert.Equal(t, []string{"tool_call"}, retryCalls)
 
-	// Steps: directive (result), ! rg turn (command), result (result), final (assistant)
-	// XML assistant turn is NOT in Steps.
-	assert.Len(t, result.Steps, 4)
-	assert.Equal(t, StepRoleResult, result.Steps[0].Role)
-	assert.Contains(t, result.Steps[0].Content, "Your previous output was rejected")
-	assert.NotContains(t, result.Steps[0].Content, "<invoke")
-	assert.Equal(t, StepRoleCommand, result.Steps[1].Role)
-	assert.True(t, strings.HasPrefix(result.Steps[2].Content, "§ ")) // command output
-	assert.Equal(t, StepRoleResult, result.Steps[2].Role)
-	assert.Equal(t, StepRoleAssistant, result.Steps[3].Role)
-	assert.Equal(t, "Found it.", result.Steps[3].Content)
+	// Steps: bad_assistant (assistant), directive (result), § rg turn (command), result (result), final (assistant)
+	// Wrong assistant message IS now included in Steps for conversation restoration.
+	assert.Len(t, result.Steps, 5)
+	assert.Equal(t, StepRoleAssistant, result.Steps[0].Role) // the hallucinated XML output
+	assert.Equal(t, StepRoleResult, result.Steps[1].Role)
+	assert.Contains(t, result.Steps[1].Content, "Unprocessed")
+	assert.NotContains(t, result.Steps[1].Content, "<invoke")
+	assert.Equal(t, StepRoleCommand, result.Steps[2].Role)
+	assert.True(t, strings.HasPrefix(result.Steps[3].Content, "§ ")) // command output
+	assert.Equal(t, StepRoleResult, result.Steps[3].Role)
+	assert.Equal(t, StepRoleAssistant, result.Steps[4].Role)
+	assert.Equal(t, "Found it.", result.Steps[4].Content)
 }
 
 func TestRun_XMLRetry_ConsumesNormalSteps(t *testing.T) {
@@ -303,7 +304,7 @@ func TestRun_XMLRetry_ConsumesNormalSteps(t *testing.T) {
 	assert.NotNil(t, result)      // result returned for observability
 	assert.Len(t, retryCalls, 3)
 	for _, r := range retryCalls {
-		assert.Equal(t, "xml_tool_call", r)
+		assert.Equal(t, "tool_call", r)
 	}
 }
 
@@ -389,26 +390,9 @@ func TestRun_MultiCommand_OnCommandStartPerCommand(t *testing.T) {
 	assert.Equal(t, []string{"pwd", "ls", "echo hi"}, started)
 }
 
-func TestRun_ConsecutiveCommands_SoftWarning(t *testing.T) {
-	responses := make([]string, 12)
-	for i := 0; i < 11; i++ {
-		responses[i] = fmt.Sprintf("§ echo step%d", i)
-	}
-	responses[11] = "Done."
-	model := &mockLanguageModel{responses: responses}
-	runner := &mockRunner{response: RunResponse{Stdout: "ok"}}
-	result, err := Run(context.Background(), newCfg(model, runner), nil, "go", Callbacks{})
-	require.NoError(t, err)
-	var warningCount int
-	for _, s := range result.Steps {
-		if s.Role == StepRoleResult && strings.Contains(s.Content, "without explaining") {
-			warningCount++
-		}
-	}
-	assert.Equal(t, 1, warningCount, "soft warning should fire exactly once at SoftWarningThreshold")
-}
-
-func TestRun_ConsecutiveCommands_TextResponseTerminatesLoop(t *testing.T) {
+func TestRun_ConsecutiveCommands_NoWarningInjected(t *testing.T) {
+	// Verify no soft warning is injected regardless of consecutive command count
+	// (SoftWarningThreshold removed — no narration nagging).
 	responses := []string{
 		"§ echo 1", "§ echo 2", "§ echo 3", "§ echo 4", "§ echo 5",
 		"Halfway.",
@@ -422,7 +406,7 @@ func TestRun_ConsecutiveCommands_TextResponseTerminatesLoop(t *testing.T) {
 	for _, s := range result.Steps {
 		if s.Role == StepRoleResult {
 			assert.NotContains(t, s.Content, "without explaining",
-				"no soft warning — counter resets on text")
+				"no soft warning should be injected")
 		}
 	}
 }

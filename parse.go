@@ -1,6 +1,9 @@
 package logos
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+)
 
 // CommandPrefix is the prefix for agent commands in LLM output.
 const CommandPrefix = "§ "
@@ -75,16 +78,18 @@ func heredocDelimiter(cmdArgs string) (string, bool) {
 	return delim[0], true
 }
 
-// ContainsXMLToolCall returns true if text contains XML tool_call patterns
-// produced by models that default to structured format (e.g. minimax).
+// toolCallXMLRe matches XML-style tool call hallucinations (case-insensitive).
+var toolCallXMLRe = regexp.MustCompile(`(?i)</?(?:tool_call|minimax:tool_call|function_call|tool_use|invoke)\b[^>]*>`)
+
+// toolCallBracketRe matches bracket-style tool call hallucinations (case-insensitive).
+var toolCallBracketRe = regexp.MustCompile(`(?i)\[/?(?:tool_?call|function_?call|tool_?use|invoke)\]`)
+
+// ContainsToolCallHallucination returns true if text contains tool call patterns
+// produced by models that hallucinate structured formats — XML tags (e.g.
+// <tool_call>) or bracket delimiters (e.g. [TOOL_CALL]...[/TOOL_CALL]).
 // Standalone utility — internal detection is handled by streamFilter during streaming.
-func ContainsXMLToolCall(text string) bool {
-	for _, marker := range xmlToolCallMarkers {
-		if strings.Contains(text, marker) {
-			return true
-		}
-	}
-	return false
+func ContainsToolCallHallucination(text string) bool {
+	return toolCallXMLRe.MatchString(text) || toolCallBracketRe.MatchString(text)
 }
 
 // xmlToolCallMarkers are substrings that indicate a model used XML tool_call
@@ -100,6 +105,23 @@ var xmlToolCallMarkers = []string{
 	"<invoke name=",
 	"<function_call>",
 	"<function_call ",
+}
+
+// bracketToolCallMarkers for case-insensitive prefix matching in streaming filter.
+var bracketToolCallMarkers = []string{
+	"[tool_call]",
+	"[/tool_call]",
+	"[function_call]",
+	"[/function_call]",
+	"[tool_use]",
+	"[/tool_use]",
+	"[invoke]",
+	"[/invoke]",
+}
+
+// containsBracketToolCall returns true if text contains bracket-style tool call patterns.
+func containsBracketToolCall(text string) bool {
+	return toolCallBracketRe.MatchString(text)
 }
 
 // stripMarkers are substrings to silently strip from streaming output.
