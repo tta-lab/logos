@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"strings"
 	"text/template"
-
-	"github.com/tta-lab/temenos/tools"
 )
 
 //go:embed system.md.tpl
@@ -15,45 +13,28 @@ var systemPromptTemplate string
 // systemPromptTmpl is parsed once at init — surfaces syntax errors at startup.
 var systemPromptTmpl = template.Must(template.New("system").Parse(systemPromptTemplate))
 
+// CommandDoc describes a command available to the agent.
+// Callers provide these to control which commands appear in the system prompt.
+type CommandDoc struct {
+	Name    string // command name, e.g. "url", "web", "rg"
+	Summary string // one-line description shown under the heading
+	Help    string // full help text (flags, examples, caveats)
+}
+
 // PromptData holds the runtime context used to render the default system prompt.
 type PromptData struct {
 	WorkingDir string
 	Platform   string
 	Date       string
-	Network    bool // include read-url + search docs
-	ReadFS     bool // include rg + read-only filesystem docs
+	Commands   []CommandDoc // caller-provided command documentation
 }
 
 // BuildSystemPrompt renders the default system prompt with runtime context.
 // The result is the base prompt — consumers append their own instructions after this.
 func BuildSystemPrompt(data PromptData) (string, error) {
-	// Build command list from capability switches.
-	var commands []tools.CommandHelp
-	if data.Network {
-		commands = append(commands, tools.ReadURLCommand, tools.SearchCommand)
-	}
-	tplData := promptTplData{
-		WorkingDir: data.WorkingDir,
-		Platform:   data.Platform,
-		Date:       data.Date,
-		Commands:   commands,
-		Network:    data.Network,
-		ReadFS:     data.ReadFS,
-	}
-
 	var buf strings.Builder
-	if err := systemPromptTmpl.Execute(&buf, tplData); err != nil {
+	if err := systemPromptTmpl.Execute(&buf, data); err != nil {
 		return "", fmt.Errorf("execute system prompt template: %w", err)
 	}
 	return buf.String(), nil
-}
-
-// promptTplData is the internal template data — keeps PromptData public API clean.
-type promptTplData struct {
-	WorkingDir string
-	Platform   string
-	Date       string
-	Commands   []tools.CommandHelp
-	Network    bool
-	ReadFS     bool
 }

@@ -71,74 +71,56 @@ func TestSystemPromptComposition_AppendsConsumerInstructions(t *testing.T) {
 		strings.Index(combined, "# Environment"))
 }
 
-func TestBuildSystemPrompt_NetworkAndReadFS(t *testing.T) {
+func TestBuildSystemPrompt_WithCommands(t *testing.T) {
 	data := PromptData{
 		Platform: "linux",
-		Date:     "2026-03-16",
-		Network:  true,
-		ReadFS:   true,
+		Date:     "2026-03-23",
+		Commands: []CommandDoc{
+			{
+				Name:    "url",
+				Summary: "Fetch a web page as markdown",
+				Help:    "Flags:\n  --tree   Show heading tree\n  -s ID    Read section by ID",
+			},
+			{Name: "web", Summary: "Search the web", Help: "Flags:\n  -n N   Max results (default 10)"},
+		},
 	}
 	result, err := BuildSystemPrompt(data)
 	require.NoError(t, err)
 
-	// Available Commands section has all three
-	assert.Contains(t, result, "## temenos read-url")
-	assert.Contains(t, result, "## temenos search")
-	assert.Contains(t, result, "## rg")
-	// Inline examples show filesystem (ReadFS takes priority)
-	assert.Contains(t, result, `§ rg "pattern" /path`)
-	assert.Contains(t, result, "§ sed -n '10,50p' /path/to/file.go | cat -n")
-	// ReadFS rule present
-	assert.Contains(t, result, "Check file size with `wc -l`")
+	assert.Contains(t, result, "# Available Commands")
+	assert.Contains(t, result, "## url")
+	assert.Contains(t, result, "Fetch a web page as markdown")
+	assert.Contains(t, result, "--tree   Show heading tree")
+	assert.Contains(t, result, "## web")
+	assert.Contains(t, result, "Search the web")
+	assert.NotContains(t, result, "temenos")
 }
 
-func TestBuildSystemPrompt_NetworkOnly(t *testing.T) {
+func TestBuildSystemPrompt_NoCommands_NoAvailableSection(t *testing.T) {
 	data := PromptData{
 		Platform: "linux",
-		Date:     "2026-03-16",
-		Network:  true,
+		Date:     "2026-03-23",
 	}
 	result, err := BuildSystemPrompt(data)
 	require.NoError(t, err)
 
-	// Available Commands section has network commands only
-	assert.Contains(t, result, "## temenos read-url")
-	assert.Contains(t, result, "## temenos search")
-	assert.NotContains(t, result, "## rg")
-	// Inline examples show URL commands
-	assert.Contains(t, result, "§ temenos read-url")
-	assert.NotContains(t, result, "! cat /path/to/file.go")
-	// No ReadFS rule
-	assert.NotContains(t, result, "Check file size with `wc -l`")
-}
-
-func TestBuildSystemPrompt_ReadFSOnly(t *testing.T) {
-	data := PromptData{
-		Platform: "linux",
-		Date:     "2026-03-16",
-		ReadFS:   true,
-	}
-	result, err := BuildSystemPrompt(data)
-	require.NoError(t, err)
-
-	assert.Contains(t, result, "## rg")
-	assert.Contains(t, result, `§ rg "pattern" /path`)
-	assert.NotContains(t, result, "## temenos read-url")
-	// ReadFS rule present
-	assert.Contains(t, result, "Check file size with `wc -l`")
-}
-
-func TestBuildSystemPrompt_NoCapabilities(t *testing.T) {
-	data := PromptData{
-		Platform: "linux",
-		Date:     "2026-03-16",
-	}
-	result, err := BuildSystemPrompt(data)
-	require.NoError(t, err)
-
-	assert.NotContains(t, result, "## rg")
-	assert.NotContains(t, result, "## temenos read-url")
+	assert.NotContains(t, result, "# Available Commands")
 	assert.Contains(t, result, "# Command Mode")
-	// No ReadFS rule
-	assert.NotContains(t, result, "Check file size with `wc -l`")
+}
+
+func TestBuildSystemPrompt_CommandOrder_Preserved(t *testing.T) {
+	data := PromptData{
+		Platform: "linux",
+		Date:     "2026-03-23",
+		Commands: []CommandDoc{
+			{Name: "rg", Summary: "Search file contents", Help: "ripgrep"},
+			{Name: "url", Summary: "Fetch web page", Help: "fetch"},
+		},
+	}
+	result, err := BuildSystemPrompt(data)
+	require.NoError(t, err)
+
+	rgIdx := strings.Index(result, "## rg")
+	urlIdx := strings.Index(result, "## url")
+	assert.Greater(t, urlIdx, rgIdx, "commands should render in provided order")
 }
