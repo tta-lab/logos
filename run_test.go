@@ -180,7 +180,7 @@ func TestStreamFilter_FastPath_NoAngle(t *testing.T) {
 		t.Errorf("got %v, want [hello world]", got)
 	}
 	if f.toolCallDetected {
-		t.Error("xmlDetected should be false")
+		t.Error("toolCallDetected should be false")
 	}
 }
 
@@ -193,7 +193,7 @@ func TestStreamFilter_Tier1_XMLToolCall(t *testing.T) {
 		t.Errorf("expected no output, got %v", got)
 	}
 	if !f.toolCallDetected {
-		t.Error("xmlDetected should be true")
+		t.Error("toolCallDetected should be true")
 	}
 }
 
@@ -207,7 +207,7 @@ func TestStreamFilter_Tier1_SplitAcrossDeltas(t *testing.T) {
 		t.Errorf("expected no output, got %v", got)
 	}
 	if !f.toolCallDetected {
-		t.Error("xmlDetected should be true")
+		t.Error("toolCallDetected should be true")
 	}
 }
 
@@ -224,7 +224,7 @@ func TestStreamFilter_Tier2_ThinkTagStripped(t *testing.T) {
 		t.Errorf("got %q, want %q", combined, "Here is the result")
 	}
 	if f.toolCallDetected {
-		t.Error("xmlDetected should be false for think tag")
+		t.Error("toolCallDetected should be false for think tag")
 	}
 }
 
@@ -242,7 +242,7 @@ func TestStreamFilter_Tier2_ThinkTagSplit(t *testing.T) {
 		t.Errorf("got %q, want %q", combined, "result")
 	}
 	if f.toolCallDetected {
-		t.Error("xmlDetected should be false")
+		t.Error("toolCallDetected should be false")
 	}
 }
 
@@ -259,7 +259,7 @@ func TestStreamFilter_HarmlessAngle_NotDetected(t *testing.T) {
 		t.Errorf("got %q, want %q", combined, "<p>some content</p>")
 	}
 	if f.toolCallDetected {
-		t.Error("xmlDetected should be false")
+		t.Error("toolCallDetected should be false")
 	}
 }
 
