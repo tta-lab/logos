@@ -1,0 +1,36 @@
+clone:
+  git:
+    image: woodpeckerci/plugin-git
+    settings:
+      partial: false
+      depth: 0
+
+when:
+  - event: pull_request
+
+steps:
+  - name: fmt-check
+    image: golang:1.26
+    commands:
+      - |
+        FILES=$(gofmt -l -s .)
+        if [ -n "$FILES" ]; then
+          echo "Code not formatted. Run 'make fmt' and commit."
+          echo "$FILES"
+          exit 1
+        fi
+
+  - name: vet
+    image: golang:1.26
+    commands:
+      - go vet ./...
+
+  - name: lint
+    image: golangci/golangci-lint:v2.10
+    commands:
+      - golangci-lint run --timeout=5m ./...
+
+  - name: test
+    image: golang:1.26
+    commands:
+      - go test -v -count=1 ./...
