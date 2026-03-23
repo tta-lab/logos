@@ -316,13 +316,24 @@ func scanForCommand(text string) (preText string, cmd Command, found bool) {
 	return text, Command{}, false
 }
 
+// isCodeFenceMarker reports whether line opens or closes a markdown code fence
+// (a line starting with three or more backticks, optionally indented).
+// Note: CommonMark allows 4+-backtick fences that nest 3-backtick content.
+// We do not handle that edge case — LLMs virtually never produce nested fences
+// in practice, so a simple toggle on any ```-prefix line is sufficient.
+func isCodeFenceMarker(line string) bool {
+	return strings.HasPrefix(strings.TrimLeft(line, " \t"), "```")
+}
+
 // scanAllCommands extracts all § commands from text, in order.
 // Returns the text before the first command and a slice of commands.
 // Heredoc bodies are captured as part of their parent command (not split).
 // Unclosed heredocs fall back to single-line capture with a warning.
+// § lines inside markdown code fences (``` ... ```) are ignored.
 func scanAllCommands(text string) (preText string, cmds []Command) {
 	lines := strings.Split(text, "\n")
 	var heredocDelim string
+	var inCodeFence bool
 	firstCmdIdx := -1
 
 	for i, line := range lines {
@@ -330,6 +341,15 @@ func scanAllCommands(text string) (preText string, cmds []Command) {
 			if isHeredocClose(line, heredocDelim) {
 				heredocDelim = ""
 			}
+			continue
+		}
+
+		if isCodeFenceMarker(line) {
+			inCodeFence = !inCodeFence
+			continue
+		}
+
+		if inCodeFence {
 			continue
 		}
 
@@ -521,6 +541,7 @@ type cmdLineFilter struct {
 	lineBuf      strings.Builder
 	suppressing  bool   // true once current line confirmed as § command
 	heredocDelim string // non-empty when inside a heredoc body (suppressing until close)
+	inCodeFence  bool   // true when inside a markdown ``` code fence (§ lines pass through)
 }
 
 // Write processes a streaming delta, suppressing § command lines and heredoc bodies.
@@ -565,8 +586,9 @@ func (f *cmdLineFilter) Write(delta string) {
 			// Check if we can already determine the line type.
 			// Trim leading whitespace (matching ParseCommand behaviour) and only
 			// decide once the trimmed content is long enough to be unambiguous.
+			// Skip early-suppression when inside a code fence.
 			trimmed := strings.TrimSpace(f.lineBuf.String())
-			if strings.HasPrefix(trimmed, CommandPrefix) {
+			if !f.inCodeFence && strings.HasPrefix(trimmed, CommandPrefix) {
 				f.suppressing = true
 				f.lineBuf.Reset()
 			} else if len(trimmed) >= len(CommandPrefix) {
@@ -582,7 +604,16 @@ func (f *cmdLineFilter) Write(delta string) {
 		f.lineBuf.WriteString(line)
 		fullLine := f.lineBuf.String()
 
-		if strings.HasPrefix(strings.TrimSpace(fullLine), CommandPrefix) {
+		// Code fence marker toggles in-fence state; pass the marker through.
+		if isCodeFenceMarker(fullLine) {
+			f.inCodeFence = !f.inCodeFence
+			f.delegate(fullLine + "\n")
+			f.lineBuf.Reset()
+			i += nl + 1
+			continue
+		}
+
+		if !f.inCodeFence && strings.HasPrefix(strings.TrimSpace(fullLine), CommandPrefix) {
 			// Check for heredoc in the complete command line.
 			if delim, ok := heredocDelimiter(fullLine); ok {
 				f.heredocDelim = delim
@@ -600,13 +631,17 @@ func (f *cmdLineFilter) Write(delta string) {
 // Flush emits any buffered partial line that isn't a § command or heredoc content.
 // Called when the stream ends (deferred in streamOneTurn).
 func (f *cmdLineFilter) Flush() {
-	if f.lineBuf.Len() > 0 && f.heredocDelim == "" && !f.suppressing &&
-		!strings.HasPrefix(strings.TrimSpace(f.lineBuf.String()), CommandPrefix) {
-		f.delegate(f.lineBuf.String())
+	if f.lineBuf.Len() > 0 && f.heredocDelim == "" && !f.suppressing {
+		content := f.lineBuf.String()
+		isCmd := !f.inCodeFence && strings.HasPrefix(strings.TrimSpace(content), CommandPrefix)
+		if !isCmd {
+			f.delegate(content)
+		}
 	}
 	f.lineBuf.Reset()
 	f.suppressing = false
 	f.heredocDelim = ""
+	f.inCodeFence = false
 }
 
 // streamOneTurn streams a single LLM response (no tools).

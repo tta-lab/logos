@@ -145,6 +145,12 @@ func TestScanAllCommands(t *testing.T) {
 		{"heredoc counts as one", "§ cat <<'EOF'\nline1\nEOF\n§ ls", "", []string{"cat <<'EOF'\nline1\nEOF", "ls"}},
 		{"bang in heredoc body ignored", "§ cat <<'EOF'\n! fake\nEOF", "", []string{"cat <<'EOF'\n! fake\nEOF"}},
 		{"unclosed heredoc fallback then command", "§ cat <<'EOF'\nno close\n§ ls", "", []string{"cat <<'EOF'", "ls"}},
+		// Code fence awareness
+		{"cmd inside fence ignored", "```\n§ ls -la\n```", "```\n§ ls -la\n```", nil},
+		{"cmd outside fence executed", "```\n§ ls -la\n```\n§ pwd", "```\n§ ls -la\n```\n", []string{"pwd"}},
+		{"cmd inside fenced block with language tag", "```sh\n§ ls -la\n```", "```sh\n§ ls -la\n```", nil},
+		{"cmds before and after fence", "§ pwd\n```\n§ ls\n```\n§ echo hi", "", []string{"pwd", "echo hi"}},
+		{"unclosed fence ignores cmd inside", "```\n§ ls", "```\n§ ls", nil},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -580,6 +586,89 @@ func TestCmdLineFilter_ProseAfterHeredocNotEaten(t *testing.T) {
 	}
 	if combined != "This must appear\n" {
 		t.Errorf("got %q, want %q", combined, "This must appear\n")
+	}
+}
+
+// --- cmdLineFilter code fence awareness tests ---
+
+func TestCmdLineFilter_CmdInsideCodeFencePassesThrough(t *testing.T) {
+	// § inside a ``` fence must not be suppressed.
+	var out []string
+	f := &cmdLineFilter{delegate: func(s string) { out = append(out, s) }}
+	f.Write("```\n§ ls -la\n```\n")
+	f.Flush()
+	combined := ""
+	for _, s := range out {
+		combined += s
+	}
+	if combined != "```\n§ ls -la\n```\n" {
+		t.Errorf("got %q, want %q", combined, "```\n§ ls -la\n```\n")
+	}
+}
+
+func TestCmdLineFilter_CmdOutsideFenceStillSuppressed(t *testing.T) {
+	// § after the fence closes must still be suppressed.
+	var out []string
+	f := &cmdLineFilter{delegate: func(s string) { out = append(out, s) }}
+	f.Write("```\n§ example\n```\n§ real-cmd\nresult\n")
+	f.Flush()
+	combined := ""
+	for _, s := range out {
+		combined += s
+	}
+	if combined != "```\n§ example\n```\nresult\n" {
+		t.Errorf("got %q, want %q", combined, "```\n§ example\n```\nresult\n")
+	}
+}
+
+func TestCmdLineFilter_CodeFenceWithLanguageTag(t *testing.T) {
+	// ``` with a language identifier still opens a fence.
+	var out []string
+	f := &cmdLineFilter{delegate: func(s string) { out = append(out, s) }}
+	f.Write("```sh\n§ ls -la\n```\n")
+	f.Flush()
+	combined := ""
+	for _, s := range out {
+		combined += s
+	}
+	if combined != "```sh\n§ ls -la\n```\n" {
+		t.Errorf("got %q, want %q", combined, "```sh\n§ ls -la\n```\n")
+	}
+}
+
+func TestCmdLineFilter_FenceSplitAcrossDeltas(t *testing.T) {
+	// Code fence marker arriving split across streaming deltas.
+	var out []string
+	f := &cmdLineFilter{delegate: func(s string) { out = append(out, s) }}
+	f.Write("``")
+	f.Write("`\n§ ls\n```\n")
+	f.Flush()
+	combined := ""
+	for _, s := range out {
+		combined += s
+	}
+	if combined != "```\n§ ls\n```\n" {
+		t.Errorf("got %q, want %q", combined, "```\n§ ls\n```\n")
+	}
+}
+
+func TestCmdLineFilter_UnclosedFenceCmdPassesThroughAndFlushResets(t *testing.T) {
+	// Stream ends inside an open fence — § line passes through, Flush resets inCodeFence.
+	var out []string
+	f := &cmdLineFilter{delegate: func(s string) { out = append(out, s) }}
+	f.Write("```\n§ ls")
+	// Stream ends mid-line with no closing fence — Flush must emit the buffered § line
+	// (fence is open so it's treated as text) and reset inCodeFence.
+	f.Flush()
+	combined := ""
+	for _, s := range out {
+		combined += s
+	}
+	if combined != "```\n§ ls" {
+		t.Errorf("got %q, want %q", combined, "```\n§ ls")
+	}
+	if f.inCodeFence {
+		t.Error("inCodeFence should be reset to false after Flush")
 	}
 }
 
