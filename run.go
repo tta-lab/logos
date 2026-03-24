@@ -476,9 +476,10 @@ func (f *streamFilter) Flush() {
 
 // cmdBlockFilter intercepts <cmd>...</cmd> blocks in the streaming output.
 // Text outside blocks passes through to the delegate immediately. Block content
-// is silently discarded — it is protocol (command invocations), not user-facing
-// output. buf holds a partial tag boundary: either a partial <cmd> prefix (not
-// in block) or the last few bytes of block content to detect a split </cmd>.
+// is buffered until </cmd> is seen, then emitted as a single complete
+// <cmd>...</cmd> chunk. This lets consumers (TUI, iOS) receive and render
+// command blocks atomically. buf holds either a partial <cmd> prefix (not in
+// block) or accumulated block content waiting for </cmd>.
 type cmdBlockFilter struct {
 	delegate func(string)
 	buf      strings.Builder
@@ -488,7 +489,7 @@ type cmdBlockFilter struct {
 func (f *cmdBlockFilter) Write(delta string) {
 	// Prepend any buffered content from the previous call so we can match tags
 	// that span delta boundaries. buf holds either a partial <cmd> prefix (not in
-	// block) or the last few bytes of block content needed to detect a split </cmd>.
+	// block) or all accumulated block content waiting for </cmd>.
 	if f.buf.Len() > 0 {
 		delta = f.buf.String() + delta
 		f.buf.Reset()
@@ -499,17 +500,13 @@ func (f *cmdBlockFilter) Write(delta string) {
 			// Inside <cmd> block — look for </cmd>
 			idx := strings.Index(delta, "</cmd>")
 			if idx == -1 {
-				// No closing tag yet. Keep last len("</cmd>")-1 bytes buffered so a
-				// split closing tag is detected on the next Write call. Discard rest.
-				const closeTag = "</cmd>"
-				tail := len(closeTag) - 1 // 5 bytes max needed for boundary
-				if len(delta) > tail {
-					delta = delta[len(delta)-tail:]
-				}
+				// No closing tag yet — buffer all content; the buf prepend at the top
+				// of Write will concatenate it with the next delta so </cmd> can be found.
 				f.buf.WriteString(delta)
 				return
 			}
-			// Found closing tag — discard block content, continue with remainder as prose
+			// Found closing tag — emit complete block as one chunk, continue with remainder as prose
+			f.delegate("<cmd>" + delta[:idx] + "</cmd>")
 			f.inBlock = false
 			delta = delta[idx+len("</cmd>"):]
 			continue
@@ -528,7 +525,7 @@ func (f *cmdBlockFilter) Write(delta string) {
 			f.delegate(delta)
 			return
 		}
-		// Pass through text before <cmd>, then enter block mode (content is discarded)
+		// Pass through text before <cmd>, then enter block mode (content buffered until </cmd>)
 		if idx > 0 {
 			f.delegate(delta[:idx])
 		}

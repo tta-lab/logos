@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestScanAllCommands(t *testing.T) {
@@ -187,11 +188,27 @@ func TestCmdBlockFilter_BlockBuffered(t *testing.T) {
 	f := &cmdBlockFilter{delegate: func(s string) { got = append(got, s) }}
 	f.Write("before<cmd>\n§ ls\n</cmd>after")
 	f.Flush()
-	// <cmd> block content is swallowed; only prose reaches the delegate
-	combined := strings.Join(got, "")
-	assert.Equal(t, "beforeafter", combined)
-	assert.NotContains(t, combined, "<cmd>")
-	assert.NotContains(t, combined, "§ ls")
+	// Block is emitted as a single chunk alongside prose
+	assert.Contains(t, got, "before")
+	assert.Contains(t, got, "<cmd>\n§ ls\n</cmd>")
+	assert.Contains(t, got, "after")
+	// Verify order: "before" comes before the block, block comes before "after"
+	beforeIdx, blockIdx, afterIdx := -1, -1, -1
+	for i, s := range got {
+		switch s {
+		case "before":
+			beforeIdx = i
+		case "<cmd>\n§ ls\n</cmd>":
+			blockIdx = i
+		case "after":
+			afterIdx = i
+		}
+	}
+	require.GreaterOrEqual(t, beforeIdx, 0, "\"before\" not found in delegate calls")
+	require.GreaterOrEqual(t, blockIdx, 0, "block chunk not found in delegate calls")
+	require.GreaterOrEqual(t, afterIdx, 0, "\"after\" not found in delegate calls")
+	assert.Less(t, beforeIdx, blockIdx)
+	assert.Less(t, blockIdx, afterIdx)
 }
 
 func TestCmdBlockFilter_SplitAcrossDeltas(t *testing.T) {
@@ -202,11 +219,12 @@ func TestCmdBlockFilter_SplitAcrossDeltas(t *testing.T) {
 	f.Write("d>more")
 	f.Flush()
 	combined := strings.Join(got, "")
-	// Block content swallowed; prose before and after passes through in order
-	assert.True(t, strings.HasPrefix(combined, "text"), "expected 'text' before 'more', got: %q", combined)
+	// Block emitted as one atomic chunk after closing tag is assembled across deltas
+	assert.Contains(t, combined, "text")
+	assert.Contains(t, got, "<cmd>\n§ ls\n</cmd>", "block should be emitted as one atomic chunk")
+	assert.Contains(t, combined, "more")
+	assert.True(t, strings.HasPrefix(combined, "text"), "expected 'text' first, got: %q", combined)
 	assert.True(t, strings.HasSuffix(combined, "more"), "expected 'more' at end, got: %q", combined)
-	assert.NotContains(t, combined, "<cmd>")
-	assert.NotContains(t, combined, "§ ls")
 }
 
 func TestCmdBlockFilter_UnclosedBlock(t *testing.T) {
@@ -227,13 +245,12 @@ func TestCmdBlockFilter_MultipleBlocksInOneWrite(t *testing.T) {
 	f.Write("before<cmd>\n§ ls\n</cmd>middle<cmd>\n§ pwd\n</cmd>after")
 	f.Flush()
 	combined := strings.Join(got, "")
-	// Only prose passes through; both blocks are swallowed
+	// Both blocks and all prose are emitted
 	assert.Contains(t, combined, "before")
+	assert.Contains(t, combined, "<cmd>\n§ ls\n</cmd>")
 	assert.Contains(t, combined, "middle")
+	assert.Contains(t, combined, "<cmd>\n§ pwd\n</cmd>")
 	assert.Contains(t, combined, "after")
-	assert.NotContains(t, combined, "<cmd>")
-	assert.NotContains(t, combined, "§ ls")
-	assert.NotContains(t, combined, "§ pwd")
 }
 
 func TestCmdBlockFilter_EmptyBlock(t *testing.T) {
@@ -241,8 +258,64 @@ func TestCmdBlockFilter_EmptyBlock(t *testing.T) {
 	f := &cmdBlockFilter{delegate: func(s string) { got = append(got, s) }}
 	f.Write("<cmd></cmd>")
 	f.Flush()
-	// Empty block produces no output
-	assert.Empty(t, got)
+	// Empty block is emitted as <cmd></cmd>
+	assert.Equal(t, []string{"<cmd></cmd>"}, got)
+}
+
+func TestCmdBlockFilter_BlockEmittedAsOneChunk(t *testing.T) {
+	var got []string
+	f := &cmdBlockFilter{delegate: func(s string) { got = append(got, s) }}
+	f.Write("<cmd>\n§ ls\n</cmd>")
+	f.Flush()
+	// Exactly one delegate call with the complete block content
+	require.Len(t, got, 1)
+	assert.Equal(t, "<cmd>\n§ ls\n</cmd>", got[0])
+}
+
+func TestCmdBlockFilter_ClosingTagSplitAcrossDeltas(t *testing.T) {
+	var got []string
+	f := &cmdBlockFilter{delegate: func(s string) { got = append(got, s) }}
+	f.Write("<cmd>\n§ ls\n</cm")
+	f.Write("d>after")
+	f.Flush()
+	combined := strings.Join(got, "")
+	assert.Contains(t, combined, "<cmd>\n§ ls\n</cmd>")
+	assert.Contains(t, combined, "after")
+}
+
+func TestCmdBlockFilter_TwoConsecutiveBlocks(t *testing.T) {
+	var got []string
+	f := &cmdBlockFilter{delegate: func(s string) { got = append(got, s) }}
+	f.Write("<cmd>\n§ ls\n</cmd><cmd>\n§ pwd\n</cmd>")
+	f.Flush()
+	// Both blocks emitted as separate delegate calls
+	assert.Contains(t, got, "<cmd>\n§ ls\n</cmd>")
+	assert.Contains(t, got, "<cmd>\n§ pwd\n</cmd>")
+}
+
+func TestCmdBlockFilter_BlockAtStreamStart(t *testing.T) {
+	var got []string
+	f := &cmdBlockFilter{delegate: func(s string) { got = append(got, s) }}
+	f.Write("<cmd>\n§ ls\n</cmd>after")
+	f.Flush()
+	// No empty-string delegate call before the block
+	for _, s := range got {
+		assert.NotEqual(t, "", s, "unexpected empty-string delegate call")
+	}
+	assert.Contains(t, got, "<cmd>\n§ ls\n</cmd>")
+	assert.Contains(t, got, "after")
+}
+
+func TestCmdBlockFilter_CompleteBlockThenUnclosed(t *testing.T) {
+	var got []string
+	f := &cmdBlockFilter{delegate: func(s string) { got = append(got, s) }}
+	f.Write("<cmd>\n§ ls\n</cmd><cmd>\n§ pwd")
+	f.Flush()
+	// First block emitted; second (unclosed) is discarded
+	assert.Contains(t, got, "<cmd>\n§ ls\n</cmd>")
+	for _, s := range got {
+		assert.NotContains(t, s, "§ pwd", "unclosed block content should be discarded")
+	}
 }
 
 func TestStreamFilter_BracketToolCall(t *testing.T) {

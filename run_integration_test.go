@@ -526,24 +526,22 @@ func TestRun_NoReasoning_BackwardCompat(t *testing.T) {
 	assert.Empty(t, result.Steps[0].Reasoning)
 	assert.Empty(t, result.Steps[0].ReasoningSignature)
 }
-func TestRun_OnDelta_ExcludesCmdBlockContent(t *testing.T) {
-	// Verify that <cmd> block content is NOT passed to OnDelta; only prose outside
-	// blocks should reach the callback. If cmdFilter and xmlFilter are accidentally
-	// swapped, cmd block content would leak through.
+func TestRun_OnDelta_IncludesCmdBlockContent(t *testing.T) {
+	// Verify that <cmd> block content IS passed to OnDelta as a complete atomic chunk.
+	// Consumers (TUI, iOS) rely on receiving complete <cmd>...</cmd> blocks to render them.
 	model := &mockLanguageModel{responses: []string{
 		"Before block.\n<cmd>\n§ ls\n</cmd>",
 		"After command.",
 	}}
 	runner := &mockRunner{response: RunResponse{Stdout: "file.txt", ExitCode: 0}}
-	var deltaAccum strings.Builder
-	cbs := Callbacks{OnDelta: func(text string) { deltaAccum.WriteString(text) }}
+	var deltas []string
+	cbs := Callbacks{OnDelta: func(text string) { deltas = append(deltas, text) }}
 	_, err := Run(context.Background(), newCfg(model, runner), nil, "list files", cbs)
 	require.NoError(t, err)
-	delta := deltaAccum.String()
-	assert.Contains(t, delta, "Before block.")
-	assert.NotContains(t, delta, "<cmd>")
-	assert.NotContains(t, delta, "§ ls")
-	assert.NotContains(t, delta, "</cmd>")
+	combined := strings.Join(deltas, "")
+	assert.Contains(t, combined, "Before block.")
+	// Block must arrive as one atomic chunk, not split across multiple OnDelta calls
+	assert.Contains(t, deltas, "<cmd>\n§ ls\n</cmd>", "block should be emitted as one atomic chunk")
 }
 
 // mockLanguageModelTwoTurnsReasoning emits reasoning+command on the first call,
