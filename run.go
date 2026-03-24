@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"charm.land/fantasy"
+	"charm.land/fantasy/providers/anthropic"
 	"github.com/tta-lab/temenos/client"
 )
 
@@ -15,9 +16,8 @@ import (
 type StepRole string
 
 const (
-	StepRoleAssistant StepRole = "assistant" // LLM turn with no commands (final answer)
+	StepRoleAssistant StepRole = "assistant" // LLM turn (with or without commands)
 	StepRoleUser      StepRole = "user"      // human input
-	StepRoleCommand   StepRole = "command"   // LLM turn that contains § commands
 	StepRoleResult    StepRole = "result"    // command output fed back to LLM
 )
 
@@ -63,9 +63,11 @@ type Config struct {
 
 // StepMessage represents one message generated during the agent loop.
 type StepMessage struct {
-	Role      StepRole
-	Content   string
-	Timestamp time.Time
+	Role               StepRole
+	Content            string
+	Reasoning          string // thinking block text (empty if no reasoning)
+	ReasoningSignature string // provider signature for round-trip
+	Timestamp          time.Time
 }
 
 // RunResult contains the agent's output after a loop completes.
@@ -134,11 +136,13 @@ func Run(
 	)
 
 	for step := 0; step < maxSteps; step++ {
-		fullText, toolCallDetected, streamErr := streamOneTurn(ctx, model, messages, maxTokens, func(text string) {
+		onDelta := func(text string) {
 			if cbs.OnDelta != nil {
 				cbs.OnDelta(text)
 			}
-		})
+		}
+		fullText, reasoning, reasoningSig, toolCallDetected, streamErr :=
+			streamOneTurn(ctx, model, messages, maxTokens, onDelta)
 		if streamErr != nil {
 			return nil, fmt.Errorf("stream turn %d: %w", step, streamErr)
 		}
@@ -155,9 +159,10 @@ func Run(
 				cbs.OnRetry("tool_call", step)
 			}
 			// Record both the wrong output and feedback in Steps (for conversation restore).
-			steps = append(steps, StepMessage{Role: StepRoleAssistant, Content: fullText, Timestamp: time.Now()})
-			steps = append(steps, StepMessage{Role: StepRoleResult, Content: directive, Timestamp: time.Now()})
-			messages = append(messages, newAssistantMessage(fullText), fantasy.NewUserMessage(directive))
+			steps = append(steps, newAssistantStep(fullText, reasoning, reasoningSig))
+			steps = append(steps, StepMessage{Role: StepRoleResult, Content: directive, Timestamp: time.Now().UTC()})
+			aMsg := newAssistantMessage(fullText, reasoning, reasoningSig)
+			messages = append(messages, aMsg, fantasy.NewUserMessage(directive))
 			continue
 		}
 
@@ -165,26 +170,28 @@ func Run(
 
 		if len(cmds) == 0 {
 			// Final answer — return
-			steps = append(steps, StepMessage{Role: StepRoleAssistant, Content: fullText, Timestamp: time.Now().UTC()})
+			steps = append(steps, newAssistantStep(fullText, reasoning, reasoningSig))
 			responseText.WriteString(fullText)
 			return &RunResult{Response: responseText.String(), Steps: steps}, nil
 		}
 
 		// Has commands — execute all sequentially
-		steps = append(steps, StepMessage{Role: StepRoleCommand, Content: fullText, Timestamp: time.Now().UTC()})
+		steps = append(steps, newAssistantStep(fullText, reasoning, reasoningSig))
 		responseText.WriteString(preText)
 
 		// Execute each command via runAndNotify (fires OnCommandResult callback),
 		// then format output for LLM with exit code suffix.
-		userContent := strings.Join(executeCommands(ctx, cfg, cbs, cmds), "\n")
-		if userContent == "" {
+		cmdOutputs := executeCommands(ctx, cfg, cbs, cmds)
+		if len(cmdOutputs) == 0 {
 			// ctx was already cancelled before any command ran; next streamOneTurn will
 			// return the context error and propagate it cleanly.
 			continue
 		}
+		userContent := "<result>\n" + strings.Join(cmdOutputs, "\n") + "\n</result>"
 
 		steps = append(steps, StepMessage{Role: StepRoleResult, Content: userContent, Timestamp: time.Now().UTC()})
-		messages = append(messages, newAssistantMessage(fullText), fantasy.NewUserMessage(userContent))
+		aMsg2 := newAssistantMessage(fullText, reasoning, reasoningSig)
+		messages = append(messages, aMsg2, fantasy.NewUserMessage(userContent))
 	}
 
 	return &RunResult{
@@ -199,11 +206,24 @@ func hallucinationDirective(attempt int) string {
 	if attempt <= 1 {
 		return "(Unprocessed: your output contained a tool call format that is not supported. " +
 			"This environment has no tool/function calling API. " +
-			"To run a command, write a plain-text line starting with § — e.g. § ls -la)"
+			"To run a command, wrap it in a <cmd> block — e.g.:\n<cmd>\n§ ls -la\n</cmd>)"
 	}
 	return fmt.Sprintf("(Unprocessed: tool call format detected again (attempt %d). "+
-		"There is NO tool calling API. The ONLY way to run commands is a line starting with § prefix. "+
-		"Do NOT use any XML tags, bracket wrappers, or structured format. Example:\n§ ls -la\n§ cat file.go)", attempt)
+		"There is NO tool calling API. The ONLY way to run commands is inside a <cmd> block. "+
+		"Do NOT use XML tags, brackets, or structured format. Example:\n<cmd>\n§ ls -la\n§ cat file.go\n</cmd>)", attempt)
+}
+
+// newAssistantStep builds a StepMessage for an assistant turn, including optional
+// reasoning fields. All three call sites share this helper to avoid repetition and
+// ensure UTC timestamps are used consistently.
+func newAssistantStep(content, reasoning, reasoningSig string) StepMessage {
+	return StepMessage{
+		Role:               StepRoleAssistant,
+		Content:            content,
+		Reasoning:          reasoning,
+		ReasoningSignature: reasoningSig,
+		Timestamp:          time.Now().UTC(),
+	}
 }
 
 // runAndNotify executes a command and fires OnCommandResult.
@@ -272,115 +292,69 @@ func execCommand(
 	return output, resp.ExitCode
 }
 
-// captureHeredoc captures the full heredoc block for a command starting at lines[startIdx].
-// Returns the updated Command with Args/Raw set to the full block, and true if the
-// closing delimiter was found. If not found, returns the original Command unchanged.
-func captureHeredoc(lines []string, startIdx int, c Command, delim string) (Command, bool) {
-	for j := startIdx + 1; j < len(lines); j++ {
-		if isHeredocClose(lines[j], delim) {
-			fullBlock := strings.Join(lines[startIdx:j+1], "\n")
-			c.Args = strings.TrimPrefix(strings.TrimSpace(fullBlock), CommandPrefix)
-			c.Raw = fullBlock
-			return c, true
-		}
-	}
-	return c, false
-}
-
-// scanForCommand finds the first § command in text.
-// If the command contains a heredoc (<<DELIM), captures lines through the
-// closing delimiter. Otherwise captures only the § line.
-// Returns text before the command, the command, and whether one was found.
-func scanForCommand(text string) (preText string, cmd Command, found bool) {
-	lines := strings.Split(text, "\n")
-	for i, line := range lines {
-		c, ok := ParseCommand(line)
-		if !ok {
-			continue
-		}
-
-		preText = strings.Join(lines[:i], "\n")
-		if preText != "" {
-			preText += "\n"
-		}
-
-		if delim, hasHeredoc := heredocDelimiter(c.Args); hasHeredoc {
-			if captured, ok := captureHeredoc(lines, i, c, delim); ok {
-				return preText, captured, true
-			}
-			// No closing delimiter found — fall through to single-line capture
-		}
-
-		return preText, c, true
-	}
-	return text, Command{}, false
-}
-
-// isCodeFenceMarker reports whether line opens or closes a markdown code fence
-// (a line starting with three or more backticks, optionally indented).
-// Note: CommonMark allows 4+-backtick fences that nest 3-backtick content.
-// We do not handle that edge case — LLMs virtually never produce nested fences
-// in practice, so a simple toggle on any ```-prefix line is sufficient.
-func isCodeFenceMarker(line string) bool {
-	return strings.HasPrefix(strings.TrimLeft(line, " \t"), "```")
-}
-
 // scanAllCommands extracts all § commands from text, in order.
-// Returns the text before the first command and a slice of commands.
-// Heredoc bodies are captured as part of their parent command (not split).
-// Unclosed heredocs fall back to single-line capture with a warning.
-// § lines inside markdown code fences (``` ... ```) are ignored.
+// Commands are only recognized inside <cmd>...</cmd> blocks.
+// Bare § lines outside blocks are treated as prose and ignored.
+// Returns the text before the first <cmd> block and a slice of commands.
 func scanAllCommands(text string) (preText string, cmds []Command) {
-	lines := strings.Split(text, "\n")
-	var heredocDelim string
-	var inCodeFence bool
-	firstCmdIdx := -1
+	remaining := text
+	firstBlockIdx := strings.Index(remaining, "<cmd>")
+	if firstBlockIdx == -1 {
+		return text, nil // no commands
+	}
+	preText = remaining[:firstBlockIdx]
 
-	for i, line := range lines {
-		if heredocDelim != "" {
-			if isHeredocClose(line, heredocDelim) {
-				heredocDelim = ""
+	for {
+		openIdx := strings.Index(remaining, "<cmd>")
+		if openIdx == -1 {
+			break
+		}
+		closeIdx := strings.Index(remaining[openIdx:], "</cmd>")
+		var blockContent string
+		if closeIdx == -1 {
+			// Unclosed block — take rest as block content and warn
+			blockContent = remaining[openIdx+len("<cmd>"):]
+			remaining = ""
+			slog.Warn("logos: unclosed <cmd> block, executing commands from partial block")
+		} else {
+			blockContent = remaining[openIdx+len("<cmd>") : openIdx+closeIdx]
+			remaining = remaining[openIdx+closeIdx+len("</cmd>"):]
+		}
+
+		// Parse § lines within the block, reusing heredoc logic.
+		lines := strings.Split(blockContent, "\n")
+		var heredocDelim string
+		for i, line := range lines {
+			if heredocDelim != "" {
+				if isHeredocClose(line, heredocDelim) {
+					heredocDelim = ""
+				}
+				continue
 			}
-			continue
-		}
-
-		if isCodeFenceMarker(line) {
-			inCodeFence = !inCodeFence
-			continue
-		}
-
-		if inCodeFence {
-			continue
-		}
-
-		c, ok := ParseCommand(line)
-		if !ok {
-			continue
-		}
-
-		if firstCmdIdx == -1 {
-			firstCmdIdx = i
-		}
-
-		if delim, hasHeredoc := heredocDelimiter(c.Args); hasHeredoc {
-			if captured, ok := captureHeredoc(lines, i, c, delim); ok {
-				c = captured
+			c, ok := ParseCommand(line)
+			if !ok {
+				continue
+			}
+			if delim, hasHeredoc := heredocDelimiter(c.Args); hasHeredoc {
+				var body strings.Builder
+				body.WriteString(c.Args)
 				heredocDelim = delim
+				for j := i + 1; j < len(lines); j++ {
+					body.WriteString("\n" + lines[j])
+					if isHeredocClose(lines[j], delim) {
+						heredocDelim = ""
+						break
+					}
+				}
+				cmds = append(cmds, Command{Raw: c.Raw, Args: body.String()})
 			} else {
-				slog.Warn("logos: unclosed heredoc — falling back to single-line capture",
-					"args", c.Args, "delimiter", delim)
+				cmds = append(cmds, c)
 			}
 		}
 
-		cmds = append(cmds, c)
-	}
-
-	if firstCmdIdx == -1 {
-		return text, nil
-	}
-	preText = strings.Join(lines[:firstCmdIdx], "\n")
-	if preText != "" {
-		preText += "\n"
+		if remaining == "" {
+			break
+		}
 	}
 	return preText, cmds
 }
@@ -500,6 +474,83 @@ func (f *streamFilter) Flush() {
 	f.buffering = false
 }
 
+// cmdBlockFilter intercepts <cmd>...</cmd> blocks in the streaming output.
+// Text outside blocks passes through to the delegate immediately. Block content
+// is silently discarded — it is protocol (command invocations), not user-facing
+// output. buf holds a partial tag boundary: either a partial <cmd> prefix (not
+// in block) or the last few bytes of block content to detect a split </cmd>.
+type cmdBlockFilter struct {
+	delegate func(string)
+	buf      strings.Builder
+	inBlock  bool
+}
+
+func (f *cmdBlockFilter) Write(delta string) {
+	// Prepend any buffered content from the previous call so we can match tags
+	// that span delta boundaries. buf holds either a partial <cmd> prefix (not in
+	// block) or the last few bytes of block content needed to detect a split </cmd>.
+	if f.buf.Len() > 0 {
+		delta = f.buf.String() + delta
+		f.buf.Reset()
+	}
+
+	for len(delta) > 0 {
+		if f.inBlock {
+			// Inside <cmd> block — look for </cmd>
+			idx := strings.Index(delta, "</cmd>")
+			if idx == -1 {
+				// No closing tag yet. Keep last len("</cmd>")-1 bytes buffered so a
+				// split closing tag is detected on the next Write call. Discard rest.
+				const closeTag = "</cmd>"
+				tail := len(closeTag) - 1 // 5 bytes max needed for boundary
+				if len(delta) > tail {
+					delta = delta[len(delta)-tail:]
+				}
+				f.buf.WriteString(delta)
+				return
+			}
+			// Found closing tag — discard block content, continue with remainder as prose
+			f.inBlock = false
+			delta = delta[idx+len("</cmd>"):]
+			continue
+		}
+		// Outside block — look for <cmd>
+		idx := strings.Index(delta, "<cmd>")
+		if idx == -1 {
+			// Check for partial <cmd> prefix at end of delta
+			for plen := min(len("<cmd>")-1, len(delta)); plen > 0; plen-- {
+				if strings.HasSuffix(delta, "<cmd>"[:plen]) {
+					f.delegate(delta[:len(delta)-plen])
+					f.buf.WriteString(delta[len(delta)-plen:])
+					return
+				}
+			}
+			f.delegate(delta)
+			return
+		}
+		// Pass through text before <cmd>, then enter block mode (content is discarded)
+		if idx > 0 {
+			f.delegate(delta[:idx])
+		}
+		f.inBlock = true
+		delta = delta[idx+len("<cmd>"):]
+	}
+}
+
+func (f *cmdBlockFilter) Flush() {
+	if f.buf.Len() > 0 {
+		if f.inBlock {
+			// Unclosed block — discard it (protocol content, not user output)
+			slog.Warn("cmdBlockFilter: stream ended with unclosed <cmd> block", "buffered_len", f.buf.Len())
+		} else {
+			// Partial <cmd> prefix that never completed — forward it as prose
+			f.delegate(f.buf.String())
+		}
+		f.buf.Reset()
+		f.inBlock = false
+	}
+}
+
 // isPrefixOfAny returns true if s is a prefix of any known marker.
 // Used to determine whether to keep buffering when we see a partial trigger sequence.
 func isPrefixOfAny(s string) bool {
@@ -530,123 +581,10 @@ func hasPrefixInSlice(s string, markers []string) bool {
 	return false
 }
 
-// cmdLineFilter buffers streaming text at line boundaries to suppress § command
-// lines before they reach the delegate. Non-command text passes through immediately
-// once the line prefix is determined.
-//
-// The § prefix (CommandPrefix from parse.go) is 3 bytes in UTF-8 (§ = 0xC2A7, then
-// space = 0x20). We buffer at most the first few bytes of each line to make the decision.
-type cmdLineFilter struct {
-	delegate     func(string) // receives non-command text (typically streamFilter.Write)
-	lineBuf      strings.Builder
-	suppressing  bool   // true once current line confirmed as § command
-	heredocDelim string // non-empty when inside a heredoc body (suppressing until close)
-	inCodeFence  bool   // true when inside a markdown ``` code fence (§ lines pass through)
-}
-
-// Write processes a streaming delta, suppressing § command lines and heredoc bodies.
-func (f *cmdLineFilter) Write(delta string) {
-	for i := 0; i < len(delta); {
-		// Heredoc body suppression — suppress all lines until closing delimiter.
-		if f.heredocDelim != "" {
-			nl := strings.IndexByte(delta[i:], '\n')
-			if nl == -1 {
-				// No newline — buffer for heredoc close check.
-				f.lineBuf.WriteString(delta[i:])
-				return
-			}
-			line := delta[i : i+nl]
-			f.lineBuf.WriteString(line)
-			fullLine := f.lineBuf.String()
-			f.lineBuf.Reset() // reset before next iteration so lines don't accumulate
-			i += nl + 1
-			if isHeredocClose(fullLine, f.heredocDelim) {
-				f.heredocDelim = ""
-			}
-			// Either way, suppress the line (body or closing delimiter).
-			continue
-		}
-
-		if f.suppressing {
-			// Scan for newline to end suppression of current § line.
-			nl := strings.IndexByte(delta[i:], '\n')
-			if nl == -1 {
-				return // rest of delta is still the suppressed line
-			}
-			// Newline found — § line is done. Don't emit the \n either.
-			f.suppressing = false
-			i += nl + 1
-			continue
-		}
-
-		nl := strings.IndexByte(delta[i:], '\n')
-		if nl == -1 {
-			// No newline — buffer remainder for prefix check.
-			f.lineBuf.WriteString(delta[i:])
-			// Check if we can already determine the line type.
-			// Trim leading whitespace (matching ParseCommand behaviour) and only
-			// decide once the trimmed content is long enough to be unambiguous.
-			// Skip early-suppression when inside a code fence.
-			trimmed := strings.TrimSpace(f.lineBuf.String())
-			if !f.inCodeFence && strings.HasPrefix(trimmed, CommandPrefix) {
-				f.suppressing = true
-				f.lineBuf.Reset()
-			} else if len(trimmed) >= len(CommandPrefix) {
-				// Trimmed content is long enough and not a command — flush buffer to delegate.
-				f.delegate(f.lineBuf.String())
-				f.lineBuf.Reset()
-			}
-			return
-		}
-
-		// Newline found at position nl (relative to delta[i:]).
-		line := delta[i : i+nl]
-		f.lineBuf.WriteString(line)
-		fullLine := f.lineBuf.String()
-
-		// Code fence marker toggles in-fence state; pass the marker through.
-		if isCodeFenceMarker(fullLine) {
-			f.inCodeFence = !f.inCodeFence
-			f.delegate(fullLine + "\n")
-			f.lineBuf.Reset()
-			i += nl + 1
-			continue
-		}
-
-		if !f.inCodeFence && strings.HasPrefix(strings.TrimSpace(fullLine), CommandPrefix) {
-			// Check for heredoc in the complete command line.
-			if delim, ok := heredocDelimiter(fullLine); ok {
-				f.heredocDelim = delim
-			}
-			f.suppressing = false // defensive reset; suppressing is always false here (callers that set it exit via return)
-			// Suppress entire line including \n.
-		} else {
-			f.delegate(fullLine + "\n")
-		}
-		f.lineBuf.Reset()
-		i += nl + 1
-	}
-}
-
-// Flush emits any buffered partial line that isn't a § command or heredoc content.
-// Called when the stream ends (deferred in streamOneTurn).
-func (f *cmdLineFilter) Flush() {
-	if f.lineBuf.Len() > 0 && f.heredocDelim == "" && !f.suppressing {
-		content := f.lineBuf.String()
-		isCmd := !f.inCodeFence && strings.HasPrefix(strings.TrimSpace(content), CommandPrefix)
-		if !isCmd {
-			f.delegate(content)
-		}
-	}
-	f.lineBuf.Reset()
-	f.suppressing = false
-	f.heredocDelim = ""
-	f.inCodeFence = false
-}
-
 // streamOneTurn streams a single LLM response (no tools).
-// Returns the full unfiltered text, whether a tool call hallucination was detected, and any error.
-// The filter suppresses tool call output from OnDelta and strips think tags.
+// Returns the full unfiltered text, reasoning content, reasoning signature,
+// whether a tool call hallucination was detected, and any error.
+// Reasoning fields are empty for providers that don't emit thinking blocks.
 // filter.Flush() is deferred so buffered content is always emitted, even on error.
 func streamOneTurn(
 	ctx context.Context,
@@ -654,40 +592,68 @@ func streamOneTurn(
 	messages []fantasy.Message,
 	maxTokens int64,
 	onDelta func(string),
-) (string, bool, error) {
-	stream, err := model.Stream(ctx, fantasy.Call{
+) (text string, reasoning string, reasoningSig string, hallucinated bool, err error) {
+	stream, streamErr := model.Stream(ctx, fantasy.Call{
 		Prompt:          fantasy.Prompt(messages),
 		MaxOutputTokens: &maxTokens,
 	})
-	if err != nil {
-		return "", false, err
+	if streamErr != nil {
+		return "", "", "", false, streamErr
 	}
 
 	xmlFilter := &streamFilter{delegate: onDelta}
-	cmdFilter := &cmdLineFilter{delegate: xmlFilter.Write}
+	cmdFilter := &cmdBlockFilter{delegate: xmlFilter.Write}
 	// Order matters: cmdFilter.Flush() must run BEFORE xmlFilter.Flush().
-	// cmdFilter.Flush() may emit a buffered partial line to xmlFilter.Write,
+	// cmdFilter.Flush() may emit buffered content to xmlFilter.Write,
 	// so xmlFilter must still be accepting input. If reversed, that content is lost.
 	defer func() { cmdFilter.Flush(); xmlFilter.Flush() }()
+
 	var fullText strings.Builder
+	var reasoningBuf strings.Builder
+
 	for part := range stream {
 		switch part.Type {
 		case fantasy.StreamPartTypeTextDelta:
 			fullText.WriteString(part.Delta)
 			cmdFilter.Write(part.Delta)
+		case fantasy.StreamPartTypeReasoningDelta:
+			if part.Delta != "" {
+				reasoningBuf.WriteString(part.Delta)
+			}
+			// Signature arrives as a ReasoningDelta with empty Delta and ProviderMetadata.
+			if part.ProviderMetadata != nil {
+				if meta, ok := part.ProviderMetadata[anthropic.Name]; ok {
+					if rm, ok := meta.(*anthropic.ReasoningOptionMetadata); ok && rm.Signature != "" {
+						reasoningSig = rm.Signature
+					}
+				}
+			}
 		case fantasy.StreamPartTypeError:
 			if part.Error != nil {
-				return fullText.String(), xmlFilter.toolCallDetected, part.Error
+				return fullText.String(), reasoningBuf.String(), reasoningSig, xmlFilter.toolCallDetected, part.Error
 			}
 		}
 	}
-	return fullText.String(), xmlFilter.toolCallDetected, nil
+	return fullText.String(), reasoningBuf.String(), reasoningSig, xmlFilter.toolCallDetected, nil
 }
 
-// newAssistantMessage wraps text as a fantasy assistant message.
-func newAssistantMessage(text string) fantasy.Message {
+// newAssistantMessage wraps text (and optional reasoning) as a fantasy assistant message.
+// If reasoning is non-empty, a ReasoningPart with the provider signature is prepended.
+func newAssistantMessage(text, reasoning, signature string) fantasy.Message {
+	var parts []fantasy.MessagePart
+	if reasoning != "" {
+		parts = append(parts, fantasy.ReasoningPart{
+			Text: reasoning,
+			ProviderOptions: fantasy.ProviderOptions{
+				anthropic.Name: &anthropic.ReasoningOptionMetadata{
+					Signature: signature,
+				},
+			},
+		})
+	}
+	parts = append(parts, fantasy.TextPart{Text: text})
 	return fantasy.Message{
 		Role:    fantasy.MessageRoleAssistant,
-		Content: []fantasy.MessagePart{fantasy.TextPart{Text: text}},
+		Content: parts,
 	}
 }

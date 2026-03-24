@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"charm.land/fantasy"
+	"charm.land/fantasy/providers/anthropic"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -21,7 +22,7 @@ import (
 const mockProviderName = "mock"
 
 type mockProvider struct {
-	model *mockLanguageModel
+	model fantasy.LanguageModel
 }
 
 func (p *mockProvider) Name() string { return mockProviderName }
@@ -95,12 +96,69 @@ func newTestTemenosServer(t *testing.T, handler http.HandlerFunc) CommandRunner 
 	return tc
 }
 
-func newCfg(model *mockLanguageModel, runner CommandRunner) Config {
+func newCfg(model fantasy.LanguageModel, runner CommandRunner) Config {
 	return Config{
 		Provider: &mockProvider{model: model},
 		Model:    "test",
 		Temenos:  runner,
 	}
+}
+
+// mockLanguageModelWithReasoning emits a reasoning block followed by text.
+type mockLanguageModelWithReasoning struct {
+	reasoning string
+	signature string
+	text      string
+}
+
+func (m *mockLanguageModelWithReasoning) Provider() string { return mockProviderName }
+func (m *mockLanguageModelWithReasoning) Model() string    { return mockProviderName }
+func (m *mockLanguageModelWithReasoning) Generate(_ context.Context, _ fantasy.Call) (*fantasy.Response, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+func (m *mockLanguageModelWithReasoning) GenerateObject(
+	_ context.Context, _ fantasy.ObjectCall,
+) (*fantasy.ObjectResponse, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+func (m *mockLanguageModelWithReasoning) StreamObject(
+	_ context.Context, _ fantasy.ObjectCall,
+) (fantasy.ObjectStreamResponse, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+func (m *mockLanguageModelWithReasoning) Stream(_ context.Context, _ fantasy.Call) (fantasy.StreamResponse, error) {
+	reasoning := m.reasoning
+	sig := m.signature
+	text := m.text
+	return func(yield func(fantasy.StreamPart) bool) {
+		// Emit reasoning start
+		if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeReasoningStart, ID: "0"}) {
+			return
+		}
+		// Emit reasoning delta
+		if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeReasoningDelta, ID: "0", Delta: reasoning}) {
+			return
+		}
+		// Emit signature via signature_delta pattern (empty Delta, ProviderMetadata with sig)
+		if !yield(fantasy.StreamPart{
+			Type: fantasy.StreamPartTypeReasoningDelta,
+			ID:   "0",
+			ProviderMetadata: fantasy.ProviderMetadata{
+				anthropic.Name: &anthropic.ReasoningOptionMetadata{Signature: sig},
+			},
+		}) {
+			return
+		}
+		// Emit reasoning end
+		if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeReasoningEnd, ID: "0"}) {
+			return
+		}
+		// Emit text delta
+		if !yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextDelta, Delta: text}) {
+			return
+		}
+		yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeFinish})
+	}, nil
 }
 
 // --- tests ---
@@ -132,7 +190,7 @@ func TestRun_NoCommand_ReturnsImmediately(t *testing.T) {
 
 func TestRun_OneCommandThenDone(t *testing.T) {
 	model := &mockLanguageModel{responses: []string{
-		"Let me check.\n§ ls -la",
+		"Let me check.\n<cmd>\n§ ls -la\n</cmd>",
 		"The files are: main.go",
 	}}
 	runner := &mockRunner{response: RunResponse{Stdout: "main.go\ngo.mod"}}
@@ -140,10 +198,10 @@ func TestRun_OneCommandThenDone(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "Let me check.\n", result.Response[:len("Let me check.\n")])
 	assert.Contains(t, result.Response, "The files are: main.go")
-	assert.Len(t, result.Steps, 3) // command, result, assistant
-	assert.Equal(t, StepRoleCommand, result.Steps[0].Role)
+	assert.Len(t, result.Steps, 3) // assistant, result, assistant
+	assert.Equal(t, StepRoleAssistant, result.Steps[0].Role)
 	assert.Equal(t, StepRoleResult, result.Steps[1].Role)
-	assert.True(t, strings.HasPrefix(result.Steps[1].Content, "§ "))
+	assert.True(t, strings.HasPrefix(result.Steps[1].Content, "<result>\n§ "))
 	require.Len(t, runner.calls, 1)
 	assert.Equal(t, "ls -la", runner.calls[0].Command) // exact command forwarded unchanged
 }
@@ -152,7 +210,7 @@ func TestRun_MaxStepsExhausted(t *testing.T) {
 	// Each LLM response contains a command, so loop never terminates naturally.
 	responses := make([]string, 35)
 	for i := range responses {
-		responses[i] = "§ echo loop"
+		responses[i] = "<cmd>\n§ echo loop\n</cmd>"
 	}
 	model := &mockLanguageModel{responses: responses}
 	runner := &mockRunner{response: RunResponse{Stdout: "loop"}}
@@ -162,25 +220,25 @@ func TestRun_MaxStepsExhausted(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "max steps")
 	assert.Len(t, runner.calls, 3) // exactly MaxSteps commands executed
-	assert.Len(t, result.Steps, 6) // 3 command + 3 result steps
+	assert.Len(t, result.Steps, 6) // 3 assistant + 3 result steps
 }
 
 func TestRun_SandboxNonZeroExitIncludedInOutput(t *testing.T) {
 	model := &mockLanguageModel{responses: []string{
-		"§ false",
+		"<cmd>\n§ false\n</cmd>",
 		"got it",
 	}}
 	runner := &mockRunner{response: RunResponse{Stderr: "error msg", ExitCode: 1}}
 	result, err := Run(context.Background(), newCfg(model, runner), nil, "run", Callbacks{})
 	require.NoError(t, err)
 	assert.Equal(t, StepRoleResult, result.Steps[1].Role)
-	assert.True(t, strings.HasPrefix(result.Steps[1].Content, "§ "))
+	assert.True(t, strings.HasPrefix(result.Steps[1].Content, "<result>\n§ "))
 	assert.Contains(t, result.Steps[1].Content, "(exit code: 1)")
 	assert.Contains(t, result.Steps[1].Content, "error msg")
 }
 
 func TestRun_OnCommandStartCallback(t *testing.T) {
-	model := &mockLanguageModel{responses: []string{"§ ls", "done"}}
+	model := &mockLanguageModel{responses: []string{"<cmd>\n§ ls\n</cmd>", "done"}}
 	runner := &mockRunner{response: RunResponse{Stdout: "file.go"}}
 	var called []string
 	cbs := Callbacks{OnCommandStart: func(cmd string) { called = append(called, cmd) }}
@@ -190,7 +248,7 @@ func TestRun_OnCommandStartCallback(t *testing.T) {
 }
 
 func TestRun_OnCommandResultCallback(t *testing.T) {
-	model := &mockLanguageModel{responses: []string{"§ echo hello", "done"}}
+	model := &mockLanguageModel{responses: []string{"<cmd>\n§ echo hello\n</cmd>", "done"}}
 	runner := &mockRunner{response: RunResponse{Stdout: "hello", ExitCode: 0}}
 	var events []string
 	cbs := Callbacks{
@@ -207,7 +265,7 @@ func TestRun_OnCommandResultCallback(t *testing.T) {
 }
 
 func TestRun_OnCommandResultCallback_NonZeroExit(t *testing.T) {
-	model := &mockLanguageModel{responses: []string{"§ false", "done"}}
+	model := &mockLanguageModel{responses: []string{"<cmd>\n§ false\n</cmd>", "done"}}
 	runner := &mockRunner{response: RunResponse{Stderr: "err msg", ExitCode: 1}}
 	var resultOutput string
 	var resultExitCode int
@@ -228,7 +286,7 @@ func TestRun_OnCommandResultCallback_NonZeroExit(t *testing.T) {
 }
 
 func TestRun_OnCommandResultCallback_TransportError(t *testing.T) {
-	model := &mockLanguageModel{responses: []string{"§ ls", "done"}}
+	model := &mockLanguageModel{responses: []string{"<cmd>\n§ ls\n</cmd>", "done"}}
 	runner := &mockRunner{err: fmt.Errorf("socket closed")}
 	var callbackOutput string
 	var callbackExitCode int
@@ -248,7 +306,7 @@ func TestRun_XMLRetry_RecoversToCommand(t *testing.T) { //nolint:dupl
 	// Turn 1: model outputs XML (detected by streaming filter). Turn 2: corrects to § command. Turn 3: done.
 	model := &mockLanguageModel{responses: []string{
 		"<invoke name=\"rg\"><parameter name=\"pattern\">foo</parameter></invoke>",
-		"§ rg foo /path",
+		"<cmd>\n§ rg foo /path\n</cmd>",
 		"Found it.",
 	}}
 	runner := &mockRunner{response: RunResponse{Stdout: "foo.go:1: foo"}}
@@ -265,15 +323,15 @@ func TestRun_XMLRetry_RecoversToCommand(t *testing.T) { //nolint:dupl
 	assert.Equal(t, "rg foo /path", runner.calls[0].Command)
 	assert.Equal(t, []string{"tool_call"}, retryCalls)
 
-	// Steps: bad_assistant (assistant), directive (result), § rg turn (command), result (result), final (assistant)
+	// Steps: bad_assistant (assistant), directive (result), rg turn (assistant), result (result), final (assistant)
 	// Wrong assistant message IS now included in Steps for conversation restoration.
 	assert.Len(t, result.Steps, 5)
 	assert.Equal(t, StepRoleAssistant, result.Steps[0].Role) // the hallucinated XML output
 	assert.Equal(t, StepRoleResult, result.Steps[1].Role)
 	assert.Contains(t, result.Steps[1].Content, "Unprocessed")
 	assert.NotContains(t, result.Steps[1].Content, "<invoke")
-	assert.Equal(t, StepRoleCommand, result.Steps[2].Role)
-	assert.True(t, strings.HasPrefix(result.Steps[3].Content, "§ ")) // command output
+	assert.Equal(t, StepRoleAssistant, result.Steps[2].Role)
+	assert.True(t, strings.HasPrefix(result.Steps[3].Content, "<result>\n§ ")) // command output
 	assert.Equal(t, StepRoleResult, result.Steps[3].Role)
 	assert.Equal(t, StepRoleAssistant, result.Steps[4].Role)
 	assert.Equal(t, "Found it.", result.Steps[4].Content)
@@ -332,7 +390,7 @@ func TestRun_XMLRetry_ThinkTagStripped(t *testing.T) {
 
 func TestRun_MultiCommand_ExecutesAll(t *testing.T) {
 	model := &mockLanguageModel{responses: []string{
-		"Let me check.\n§ pwd\n§ ls -la",
+		"Let me check.\n<cmd>\n§ pwd\n§ ls -la\n</cmd>",
 		"Found the files.",
 	}}
 	runner := &mockRunner{response: RunResponse{Stdout: "ok"}}
@@ -352,7 +410,7 @@ func TestRun_MultiCommand_ExecutesAll(t *testing.T) {
 
 func TestRun_MultiCommand_ExitCodeFormatted(t *testing.T) {
 	model := &mockLanguageModel{responses: []string{
-		"§ false\n§ echo ok",
+		"<cmd>\n§ false\n§ echo ok\n</cmd>",
 		"Got it.",
 	}}
 	runner := &mockRunner{response: RunResponse{Stderr: "error", ExitCode: 1}}
@@ -365,7 +423,7 @@ func TestRun_MultiCommand_ExitCodeFormatted(t *testing.T) {
 
 func TestRun_MultiCommand_WithHeredoc(t *testing.T) {
 	model := &mockLanguageModel{responses: []string{
-		"§ cat <<'EOF'\nhello\nEOF\n§ ls -la",
+		"<cmd>\n§ cat <<'EOF'\nhello\nEOF\n§ ls -la\n</cmd>",
 		"Done.",
 	}}
 	runner := &mockRunner{response: RunResponse{Stdout: "ok"}}
@@ -379,7 +437,7 @@ func TestRun_MultiCommand_WithHeredoc(t *testing.T) {
 
 func TestRun_MultiCommand_OnCommandStartPerCommand(t *testing.T) {
 	model := &mockLanguageModel{responses: []string{
-		"§ pwd\n§ ls\n§ echo hi",
+		"<cmd>\n§ pwd\n§ ls\n§ echo hi\n</cmd>",
 		"All done.",
 	}}
 	runner := &mockRunner{response: RunResponse{Stdout: "ok"}}
@@ -394,9 +452,11 @@ func TestRun_ConsecutiveCommands_NoWarningInjected(t *testing.T) {
 	// Verify no soft warning is injected regardless of consecutive command count
 	// (SoftWarningThreshold removed — no narration nagging).
 	responses := []string{
-		"§ echo 1", "§ echo 2", "§ echo 3", "§ echo 4", "§ echo 5",
+		"<cmd>\n§ echo 1\n</cmd>", "<cmd>\n§ echo 2\n</cmd>", "<cmd>\n§ echo 3\n</cmd>",
+		"<cmd>\n§ echo 4\n</cmd>", "<cmd>\n§ echo 5\n</cmd>",
 		"Halfway.",
-		"§ echo 6", "§ echo 7", "§ echo 8", "§ echo 9", "§ echo 10",
+		"<cmd>\n§ echo 6\n</cmd>", "<cmd>\n§ echo 7\n</cmd>", "<cmd>\n§ echo 8\n</cmd>",
+		"<cmd>\n§ echo 9\n</cmd>", "<cmd>\n§ echo 10\n</cmd>",
 		"Done.",
 	}
 	model := &mockLanguageModel{responses: responses}
@@ -414,7 +474,7 @@ func TestRun_ConsecutiveCommands_NoWarningInjected(t *testing.T) {
 func TestRun_HeredocCommand_FullBlockSentToRunner(t *testing.T) {
 	// Model issues a heredoc command — runner must receive the complete multi-line block.
 	model := &mockLanguageModel{responses: []string{
-		"§ cat <<'EOF'\nline1\nline2\nEOF",
+		"<cmd>\n§ cat <<'EOF'\nline1\nline2\nEOF\n</cmd>",
 		"Created.",
 	}}
 	runner := &mockRunner{response: RunResponse{Stdout: "ok"}}
@@ -436,9 +496,121 @@ func TestRun_HttpServer_JsonEncodingRoundtrip(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(RunResponse{Stdout: "ok", ExitCode: 0}) //nolint:errcheck
 	})
-	model := &mockLanguageModel{responses: []string{"§ echo hi", "done"}}
+	model := &mockLanguageModel{responses: []string{"<cmd>\n§ echo hi\n</cmd>", "done"}}
 	cfg := newCfg(model, tc)
 	_, err := Run(context.Background(), cfg, nil, "test", Callbacks{})
 	require.NoError(t, err)
 	assert.Equal(t, "echo hi", receivedCmd)
+}
+
+func TestRun_ReasoningCaptured(t *testing.T) {
+	model := &mockLanguageModelWithReasoning{
+		reasoning: "Let me think...",
+		signature: "sig123",
+		text:      "The answer is 42.",
+	}
+	runner := &mockRunner{}
+	result, err := Run(context.Background(), newCfg(model, runner), nil, "question", Callbacks{})
+	require.NoError(t, err)
+	require.Len(t, result.Steps, 1)
+	assert.Equal(t, "Let me think...", result.Steps[0].Reasoning)
+	assert.Equal(t, "sig123", result.Steps[0].ReasoningSignature)
+	assert.Equal(t, "The answer is 42.", result.Steps[0].Content)
+}
+
+func TestRun_NoReasoning_BackwardCompat(t *testing.T) {
+	model := &mockLanguageModel{responses: []string{"simple answer"}}
+	runner := &mockRunner{}
+	result, err := Run(context.Background(), newCfg(model, runner), nil, "question", Callbacks{})
+	require.NoError(t, err)
+	assert.Empty(t, result.Steps[0].Reasoning)
+	assert.Empty(t, result.Steps[0].ReasoningSignature)
+}
+func TestRun_OnDelta_ExcludesCmdBlockContent(t *testing.T) {
+	// Verify that <cmd> block content is NOT passed to OnDelta; only prose outside
+	// blocks should reach the callback. If cmdFilter and xmlFilter are accidentally
+	// swapped, cmd block content would leak through.
+	model := &mockLanguageModel{responses: []string{
+		"Before block.\n<cmd>\n§ ls\n</cmd>",
+		"After command.",
+	}}
+	runner := &mockRunner{response: RunResponse{Stdout: "file.txt", ExitCode: 0}}
+	var deltaAccum strings.Builder
+	cbs := Callbacks{OnDelta: func(text string) { deltaAccum.WriteString(text) }}
+	_, err := Run(context.Background(), newCfg(model, runner), nil, "list files", cbs)
+	require.NoError(t, err)
+	delta := deltaAccum.String()
+	assert.Contains(t, delta, "Before block.")
+	assert.NotContains(t, delta, "<cmd>")
+	assert.NotContains(t, delta, "§ ls")
+	assert.NotContains(t, delta, "</cmd>")
+}
+
+// mockLanguageModelTwoTurnsReasoning emits reasoning+command on the first call,
+// then plain text on the second call. Used to test reasoning capture on intermediate steps.
+type mockLanguageModelTwoTurnsReasoning struct {
+	reasoning string
+	signature string
+	call      int
+}
+
+func (m *mockLanguageModelTwoTurnsReasoning) Provider() string { return mockProviderName }
+func (m *mockLanguageModelTwoTurnsReasoning) Model() string    { return mockProviderName }
+func (m *mockLanguageModelTwoTurnsReasoning) Generate(_ context.Context, _ fantasy.Call) (*fantasy.Response, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+func (m *mockLanguageModelTwoTurnsReasoning) GenerateObject(
+	_ context.Context, _ fantasy.ObjectCall,
+) (*fantasy.ObjectResponse, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+func (m *mockLanguageModelTwoTurnsReasoning) StreamObject(
+	_ context.Context, _ fantasy.ObjectCall,
+) (fantasy.ObjectStreamResponse, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+func (m *mockLanguageModelTwoTurnsReasoning) Stream(_ context.Context, _ fantasy.Call) (fantasy.StreamResponse, error) {
+	turn := m.call
+	m.call++
+	if turn == 0 {
+		reasoning := m.reasoning
+		sig := m.signature
+		return func(yield func(fantasy.StreamPart) bool) {
+			yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeReasoningStart, ID: "0"})                   //nolint:errcheck
+			yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeReasoningDelta, ID: "0", Delta: reasoning}) //nolint:errcheck
+			yield(fantasy.StreamPart{                                                                        //nolint:errcheck
+				Type: fantasy.StreamPartTypeReasoningDelta,
+				ID:   "0",
+				ProviderMetadata: fantasy.ProviderMetadata{
+					anthropic.Name: &anthropic.ReasoningOptionMetadata{Signature: sig},
+				},
+			})
+			yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeReasoningEnd, ID: "0"})                   //nolint:errcheck
+			yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextDelta, Delta: "<cmd>\n§ ls\n</cmd>"}) //nolint:errcheck
+			yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeFinish})                                  //nolint:errcheck
+		}, nil
+	}
+	return func(yield func(fantasy.StreamPart) bool) {
+		yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextDelta, Delta: "done"}) //nolint:errcheck
+		yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeFinish})                   //nolint:errcheck
+	}, nil
+}
+
+func TestRun_ReasoningCaptured_WithCommand(t *testing.T) {
+	// Verify reasoning is captured on the intermediate (command-issuing) step, not just
+	// the terminal step. This exercises the newAssistantStep path inside the "has commands" branch.
+	model := &mockLanguageModelTwoTurnsReasoning{
+		reasoning: "I should check files first.",
+		signature: "sigABC",
+	}
+	runner := &mockRunner{response: RunResponse{Stdout: "main.go", ExitCode: 0}}
+	result, err := Run(context.Background(), newCfg(model, runner), nil, "find files", Callbacks{})
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(result.Steps), 2)
+	// Step 0 is the command-issuing assistant step — must carry reasoning.
+	assert.Equal(t, StepRoleAssistant, result.Steps[0].Role)
+	assert.Equal(t, "I should check files first.", result.Steps[0].Reasoning)
+	assert.Equal(t, "sigABC", result.Steps[0].ReasoningSignature)
+	// Step 1 is the result step.
+	assert.Equal(t, StepRoleResult, result.Steps[1].Role)
 }

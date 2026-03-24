@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What is logos
 
-logos is a Go library that implements a stateless agent loop. LLMs think in plain text and act via `§ ` prefixed shell commands — no tool schemas, no JSON. The loop is: prompt → LLM → scan for `§ command` → execute in sandbox → feed output back → repeat.
+logos is a Go library that implements a stateless agent loop. LLMs think in plain text and act via `§ ` prefixed shell commands inside `<cmd>...</cmd>` blocks — no tool schemas, no JSON. The loop is: prompt → LLM → scan for `<cmd>` block with `§ command` → execute in sandbox → feed `<result>` back → repeat.
 
 ## Key dependencies
 
@@ -32,15 +32,15 @@ Pre-commit hooks (lefthook): fmt check, vet, lint — run in parallel.
 
 This is a single-package library (`package logos`). All source is at the root.
 
-- **run.go** — Core `Run()` function: the agent loop. Takes `Config` (provider, model, temenos client, sandbox env), conversation history, a prompt, and streaming callbacks. Returns `RunResult` with accumulated response text and step messages. Internally uses `scanForCommand` to detect `§ ` lines, executes them via `CommandRunner` interface, and feeds output back as the next user message.
+- **run.go** — Core `Run()` function: the agent loop. Takes `Config` (provider, model, temenos client, sandbox env), conversation history, a prompt, and streaming callbacks. Returns `RunResult` with accumulated response text and step messages. Internally uses `scanAllCommands` to detect `§ ` lines inside `<cmd>...</cmd>` blocks, executes them via `CommandRunner` interface, and feeds output back wrapped in `<result>...</result>`.
 - **parse.go** — `ParseCommand()`: detects lines starting with `§ ` (after optional whitespace) and extracts the command args.
 - **prompt.go** — `BuildSystemPrompt()`: renders `system.md.tpl` (embedded via `//go:embed`) with runtime context (working dir, platform, date) and caller-provided `CommandDoc` entries. No built-in tool knowledge — consumers provide command documentation via `PromptData.Commands`. Consumers append their own instructions after the base prompt.
-- **system.md.tpl** — Go template for the system prompt. Instructs the LLM to use `§ ` prefix for commands.
+- **system.md.tpl** — Go template for the system prompt. Instructs the LLM to wrap `§ ` commands in `<cmd>...</cmd>` blocks.
 
 ## Design principles
 
 - **Stateless**: `Run()` takes history in, returns steps out. The caller owns persistence.
-- **One command per turn**: `scanForCommand` finds the first `§ ` line and stops; remaining text after it is ignored.
+- **Multi-command blocks**: `scanAllCommands` extracts all `§ ` lines from `<cmd>...</cmd>` blocks; bare `§` outside blocks are prose and ignored.
 - **CommandRunner interface**: `temenos/client.Client` satisfies it, but tests use mock implementations.
 
 ## Testing

@@ -1,9 +1,9 @@
 # logos
 
-Stateless agent loop for Go. LLMs think in plain text and act via `§ ` prefixed shell commands — no tool schemas, no JSON.
+Stateless agent loop for Go. LLMs think in plain text and act via `§ ` prefixed shell commands inside `<cmd>` blocks — no tool schemas, no JSON.
 
 ```
-prompt → LLM → scan for "§ command" → execute in sandbox → feed output back → repeat
+prompt → LLM → scan <cmd> blocks for "§ command" → execute in sandbox → feed <result> back → repeat
 ```
 
 ## Install
@@ -34,24 +34,26 @@ result, err := logos.Run(ctx, logos.Config{
 })
 ```
 
-The LLM responds in plain text. When it wants to act, it writes a `§ ` line:
+The LLM responds in plain text. When it wants to act, it wraps commands in a `<cmd>` block:
 
 ```
 Let me check the file structure first.
 
+<cmd>
 § ls -la /app
+</cmd>
 ```
 
-logos detects the command, executes it in a [temenos](https://github.com/tta-lab/temenos) sandbox, and feeds the output back as the next user message. The loop continues until the LLM responds without a command.
+logos detects the commands, executes them in a [temenos](https://github.com/tta-lab/temenos) sandbox, and feeds the output back wrapped in `<result>`. The loop continues until the LLM responds without any `<cmd>` blocks.
 
 ## How it works
 
 1. **`Run()`** takes config, conversation history, a prompt, and streaming callbacks
 2. Each turn, the LLM streams a response
-3. **`scanForCommand()`** finds the first `§ ` line — one command per turn
-4. The command runs via the `CommandRunner` interface (temenos sandbox)
-5. Output becomes the next user message; loop repeats
-6. When the LLM responds with no command, the loop ends and returns `RunResult`
+3. **`scanAllCommands()`** extracts all `§ ` lines from `<cmd>...</cmd>` blocks
+4. Commands run via the `CommandRunner` interface (temenos sandbox)
+5. Output wrapped in `<result>` becomes the next user message; loop repeats
+6. When the LLM responds with no `<cmd>` blocks, the loop ends and returns `RunResult`
 
 ## Key types
 
@@ -59,7 +61,7 @@ logos detects the command, executes it in a [temenos](https://github.com/tta-lab
 |------|---------|
 | `Config` | Provider, model, temenos client, sandbox env, allowed paths |
 | `RunResult` | Final response text + all step messages |
-| `StepMessage` | One message in the loop (assistant text or command output) |
+| `StepMessage` | One message in the loop (assistant text, with optional reasoning, or command output) |
 | `Callbacks` | Optional `OnDelta` and `OnCommandStart` streaming hooks |
 | `CommandRunner` | Interface for command execution — temenos satisfies it |
 
@@ -80,9 +82,10 @@ systemPrompt := base + "\n\n" + customInstructions
 ## Design
 
 - **Stateless** — `Run()` takes history in, returns steps out. The caller owns persistence.
-- **One command per turn** — finds the first `§ ` line and stops; text after is ignored.
+- **Multi-command blocks** — all `§ ` lines inside a `<cmd>` block run sequentially; bare `§` outside blocks are prose and ignored.
 - **Sandboxed** — commands execute in [temenos](https://github.com/tta-lab/temenos), not on the host.
 - **Provider-agnostic** — uses [fantasy](https://charm.land/fantasy) for LLM abstraction.
+- **Reasoning round-trip** — thinking blocks (Anthropic extended thinking) captured in `StepMessage.Reasoning` and `ReasoningSignature` for conversation restoration.
 
 ## Dependencies
 
