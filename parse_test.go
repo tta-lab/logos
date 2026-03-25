@@ -2,44 +2,6 @@ package logos
 
 import "testing"
 
-func TestHeredocDelimiter(t *testing.T) {
-	tests := []struct {
-		args      string
-		wantDelim string
-		wantOK    bool
-	}{
-		// Standard forms
-		{"cat <<EOF", "EOF", true},
-		{"cat <<'EOF'", "EOF", true},
-		{"cat <<\"EOF\"", "EOF", true},
-		// Dash (tab-stripping) forms
-		{"cat <<-EOF", "EOF", true},
-		{"cat <<-'MARKER'", "MARKER", true},
-		{"cat <<- 'PLANEOF'", "PLANEOF", true},  // dash + space + quoted
-		{"cat <<-\"PLANEOF\"", "PLANEOF", true}, // dash + double-quoted
-		// With pipes and redirects
-		{"cat <<'EOF' | wc -l", "EOF", true},
-		{"cat <<'EOF' > out.txt", "EOF", true},
-		// No heredoc
-		{"ls -la", "", false},
-		{"echo hello", "", false},
-		// Edge cases
-		{"cat <<", "", false}, // no delimiter after <<
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.args, func(t *testing.T) {
-			delim, ok := heredocDelimiter(tt.args)
-			if ok != tt.wantOK {
-				t.Errorf("ok = %v, want %v", ok, tt.wantOK)
-			}
-			if delim != tt.wantDelim {
-				t.Errorf("delim = %q, want %q", delim, tt.wantDelim)
-			}
-		})
-	}
-}
-
 func TestContainsToolCallHallucination(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -82,39 +44,5 @@ func TestContainsToolCallHallucination(t *testing.T) {
 				t.Errorf("ContainsToolCallHallucination() = %v, want %v", got, tt.want)
 			}
 		})
-	}
-}
-
-func TestParseCommand(t *testing.T) {
-	tests := []struct {
-		line     string
-		wantArgs string
-		wantOK   bool
-	}{
-		{"§ ls -la", "ls -la", true},
-		{"§ rg 'pattern' /dir", "rg 'pattern' /dir", true},
-		{"§ logos read /path/to/file.go", "logos read /path/to/file.go", true},
-		{"§ logos search \"golang context\"", "logos search \"golang context\"", true},
-		{"  § ls", "ls", true},    // leading whitespace OK
-		{"!", "", false},          // just bang, no space
-		{"§ ", "", false},         // section sign + space, no command
-		{"echo hello", "", false}, // no § prefix
-		{"", "", false},           // empty
-		{"# § ls", "", false},     // commented out
-		{"§ls", "", false},        // no space after §
-		// Old prefixes must NOT be parsed as command
-		{"$ ls -la", "", false},     // old dollar prefix no longer recognized
-		{"$ rg pattern", "", false}, // old dollar prefix no longer recognized
-	}
-
-	for _, tt := range tests {
-		cmd, ok := ParseCommand(tt.line)
-		if ok != tt.wantOK {
-			t.Errorf("ParseCommand(%q): got ok=%v, want %v", tt.line, ok, tt.wantOK)
-			continue
-		}
-		if ok && cmd.Args != tt.wantArgs {
-			t.Errorf("ParseCommand(%q): got args=%q, want %q", tt.line, cmd.Args, tt.wantArgs)
-		}
 	}
 }

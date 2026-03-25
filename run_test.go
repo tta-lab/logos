@@ -8,41 +8,34 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestScanAllCommands(t *testing.T) {
+func TestScanBlocks(t *testing.T) {
 	tests := []struct {
-		name     string
-		text     string
-		wantPre  string
-		wantCmds []string
+		name       string
+		text       string
+		wantPre    string
+		wantBlocks []string
 	}{
-		{"no commands", "Just text.", "Just text.", nil},
-		{"one command in block", "<cmd>\n§ ls -la\n</cmd>", "", []string{"ls -la"}},
-		{"two commands in block", "<cmd>\n§ pwd\n§ ls -la\n</cmd>", "", []string{"pwd", "ls -la"}},
-		{"text before block", "Let me check.\n<cmd>\n§ pwd\n§ ls\n</cmd>", "Let me check.\n", []string{"pwd", "ls"}},
-		{"heredoc in block", "<cmd>\n§ cat <<'EOF'\nline1\nEOF\n§ ls\n</cmd>", "", []string{"cat <<'EOF'\nline1\nEOF", "ls"}},
-		{"bare § outside block ignored", "§ ls -la", "§ ls -la", nil},
-		{"text after block", "before<cmd>\n§ ls\n</cmd>after", "before", []string{"ls"}},
+		{"no blocks", "Just text.", "Just text.", nil},
+		{"one block", "<cmd>\n§ ls -la\n</cmd>", "", []string{"\n§ ls -la\n"}},
+		{"text before block", "Let me check.\n<cmd>\n§ pwd\n</cmd>", "Let me check.\n", []string{"\n§ pwd\n"}},
+		{"bare § outside block", "§ ls -la", "§ ls -la", nil},
+		{"multiple blocks", "<cmd>\n§ ls\n</cmd>text<cmd>\n§ pwd\n</cmd>", "", []string{"\n§ ls\n", "\n§ pwd\n"}},
+		{"unclosed block", "<cmd>\n§ ls", "", []string{"\n§ ls"}},
 		{"empty block", "<cmd></cmd>", "", nil},
-		{"multiple blocks", "<cmd>\n§ ls\n</cmd>text<cmd>\n§ pwd\n</cmd>", "", []string{"ls", "pwd"}},
-		{"unclosed block", "<cmd>\n§ ls", "", []string{"ls"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			preText, cmds := scanAllCommands(tt.text)
+			preText, blocks := scanBlocks(tt.text)
 			if preText != tt.wantPre {
 				t.Errorf("preText = %q, want %q", preText, tt.wantPre)
 			}
-			var gotArgs []string
-			for _, c := range cmds {
-				gotArgs = append(gotArgs, c.Args)
-			}
-			if len(gotArgs) != len(tt.wantCmds) {
-				t.Errorf("got %d commands, want %d: %v", len(gotArgs), len(tt.wantCmds), gotArgs)
+			if len(blocks) != len(tt.wantBlocks) {
+				t.Errorf("got %d blocks, want %d: %v", len(blocks), len(tt.wantBlocks), blocks)
 				return
 			}
-			for i := range gotArgs {
-				if gotArgs[i] != tt.wantCmds[i] {
-					t.Errorf("cmd[%d] = %q, want %q", i, gotArgs[i], tt.wantCmds[i])
+			for i := range blocks {
+				if blocks[i] != tt.wantBlocks[i] {
+					t.Errorf("block[%d] = %q, want %q", i, blocks[i], tt.wantBlocks[i])
 				}
 			}
 		})

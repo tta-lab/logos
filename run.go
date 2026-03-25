@@ -35,16 +35,18 @@ const MaxHallucinationRetries = 3
 type (
 	// AllowedPath specifies a filesystem path allowed in the sandbox.
 	AllowedPath = client.AllowedPath
-	// RunRequest is the request payload for sandboxed command execution.
-	RunRequest = client.RunRequest
-	// RunResponse is the response from sandboxed command execution.
-	RunResponse = client.RunResponse
+	// RunBlockRequest is the request payload for batch block execution.
+	RunBlockRequest = client.RunBlockRequest
+	// RunBlockResponse is the response from batch block execution.
+	RunBlockResponse = client.RunBlockResponse
+	// CommandResult is one command's execution result within a block.
+	CommandResult = client.CommandResult
 )
 
-// CommandRunner executes a sandboxed command and returns the result.
+// BlockRunner executes a block of commands in the sandbox.
 // *client.Client satisfies this interface automatically.
-type CommandRunner interface {
-	Run(ctx context.Context, req RunRequest) (*RunResponse, error)
+type BlockRunner interface {
+	RunBlock(ctx context.Context, req RunBlockRequest) (*RunBlockResponse, error)
 }
 
 // Config holds everything needed to run one agent loop iteration.
@@ -54,11 +56,14 @@ type Config struct {
 	SystemPrompt string
 	MaxSteps     int // 0 means use default (DefaultMaxSteps)
 	MaxTokens    int // 0 means use default (DefaultMaxTokens)
-	Temenos      CommandRunner
+	Temenos      BlockRunner
 	SandboxEnv   map[string]string // env vars passed to temenos per-request
 	// AllowedPaths lists filesystem paths accessible during command execution.
 	// Path validation (non-empty, absolute) is enforced by the temenos daemon.
 	AllowedPaths []AllowedPath
+	// Prefix is the command prefix the LLM uses (e.g. "§ ").
+	// Passed to RunBlock so temenos can parse commands. Defaults to "§ ".
+	Prefix string
 }
 
 // StepMessage represents one message generated during the agent loop.
@@ -81,12 +86,9 @@ type RunResult struct {
 type Callbacks struct {
 	// OnDelta is called with each text delta as the LLM streams its response.
 	OnDelta func(text string)
-	// OnCommandStart is called when a § command is detected, before execution.
-	OnCommandStart func(command string)
 	// OnCommandResult is called after a command executes with the command string,
 	// raw combined stdout+stderr output (no exit code suffix), and the exit code.
-	// exitCode is -1 if the sandbox itself failed to execute the command (temenos
-	// transport error), in which case output contains the error description.
+	// Fires once per CommandResult from the batch response.
 	OnCommandResult func(command string, output string, exitCode int)
 	// OnRetry is called when a tool call hallucination (XML or bracket) is detected
 	// and an "unprocessed" directive is injected. reason is "tool_call".
@@ -166,24 +168,22 @@ func Run(
 			continue
 		}
 
-		preText, cmds := scanAllCommands(fullText)
+		preText, blocks := scanBlocks(fullText)
 
-		if len(cmds) == 0 {
+		if len(blocks) == 0 {
 			// Final answer — return
 			steps = append(steps, newAssistantStep(fullText, reasoning, reasoningSig))
 			responseText.WriteString(fullText)
 			return &RunResult{Response: responseText.String(), Steps: steps}, nil
 		}
 
-		// Has commands — execute all sequentially
+		// Has command blocks — execute via temenos RunBlock
 		steps = append(steps, newAssistantStep(fullText, reasoning, reasoningSig))
 		responseText.WriteString(preText)
 
-		// Execute each command via runAndNotify (fires OnCommandResult callback),
-		// then format output for LLM with exit code suffix.
-		cmdOutputs := executeCommands(ctx, cfg, cbs, cmds)
+		cmdOutputs := executeBlocks(ctx, cfg, cbs, blocks)
 		if len(cmdOutputs) == 0 {
-			// ctx was already cancelled before any command ran; next streamOneTurn will
+			// ctx was already cancelled before any block ran; next streamOneTurn will
 			// return the context error and propagate it cleanly.
 			continue
 		}
@@ -226,83 +226,75 @@ func newAssistantStep(content, reasoning, reasoningSig string) StepMessage {
 	}
 }
 
-// runAndNotify executes a command and fires OnCommandResult.
-// Returns raw output and exit code; callers format for LLM separately.
-func runAndNotify(ctx context.Context, cfg Config, cbs Callbacks, args string) (string, int) {
-	rawOutput, exitCode := execCommand(ctx, cfg.Temenos, args, cfg.SandboxEnv, cfg.AllowedPaths)
-	if cbs.OnCommandResult != nil {
-		cbs.OnCommandResult(args, rawOutput, exitCode)
+// executeBlocks sends each block to temenos via RunBlock and formats results.
+// Fires OnCommandResult callback per command result from the batch.
+//
+// Design note: transport errors (RunBlock call fails entirely) are NOT surfaced
+// via OnCommandResult. In the batch model, a transport error means we got zero
+// results — there's no meaningful command/exitCode to report. The error appears
+// in the output text sent back to the LLM so it can retry.
+func executeBlocks(ctx context.Context, cfg Config, cbs Callbacks, blocks []string) []string {
+	prefix := cfg.Prefix
+	if prefix == "" {
+		prefix = "§ " // default for backward compat
 	}
-	return rawOutput, exitCode
-}
 
-// executeCommands runs each command sequentially, firing OnCommandStart per command,
-// and returns formatted output parts ready for joining into a user message.
-// Stops early if ctx is already cancelled before a command starts.
-func executeCommands(ctx context.Context, cfg Config, cbs Callbacks, cmds []Command) []string {
-	outputParts := make([]string, 0, len(cmds))
-	for _, cmd := range cmds {
+	var outputParts []string
+	for _, block := range blocks {
 		if ctx.Err() != nil {
 			break
 		}
-		if cbs.OnCommandStart != nil {
-			cbs.OnCommandStart(cmd.Args)
+
+		resp, err := cfg.Temenos.RunBlock(ctx, RunBlockRequest{
+			Block:        block,
+			Prefix:       prefix,
+			Env:          cfg.SandboxEnv,
+			AllowedPaths: cfg.AllowedPaths,
+		})
+		if err != nil {
+			slog.Error("temenos RunBlock failure", "error", err)
+			outputParts = append(outputParts, fmt.Sprintf("execution error: %v", err))
+			continue
 		}
-		rawOutput, exitCode := runAndNotify(ctx, cfg, cbs, cmd.Args)
-		outputParts = append(outputParts, CommandPrefix+cmd.Args+"\n"+formatForLLM(rawOutput, exitCode))
+
+		if len(resp.Results) == 0 {
+			slog.Warn("logos: RunBlock returned no results; possible prefix mismatch", "prefix", prefix)
+			outputParts = append(outputParts, fmt.Sprintf("(block produced no results with prefix %q)", prefix))
+			continue
+		}
+
+		for _, r := range resp.Results {
+			output := r.Stdout
+			if r.Stderr != "" {
+				output += "\nSTDERR:\n" + r.Stderr
+			}
+			if output == "" {
+				output = "(no output)"
+			}
+			if cbs.OnCommandResult != nil {
+				cbs.OnCommandResult(r.Command, output, r.ExitCode)
+			}
+
+			formatted := prefix + r.Command + "\n" + output
+			if r.ExitCode != 0 && r.ExitCode != -1 {
+				formatted += fmt.Sprintf("\n(exit code: %d)", r.ExitCode)
+			}
+			outputParts = append(outputParts, formatted)
+		}
 	}
 	return outputParts
 }
 
-// formatForLLM formats command output for the LLM message.
-// Appends exit code suffix for non-zero exits; skips it for exitCode -1 (transport
-// error) since rawOutput already contains the error description.
-func formatForLLM(rawOutput string, exitCode int) string {
-	if exitCode != 0 && exitCode != -1 {
-		return rawOutput + fmt.Sprintf("\n(exit code: %d)", exitCode)
-	}
-	return rawOutput
-}
-
-// execCommand runs a shell command via the temenos daemon and returns the raw
-// combined output and exit code. The "(no output)" sentinel is included in
-// rawOutput when the command produces nothing. On temenos error, returns an
-// error string and exitCode -1.
-func execCommand(
-	ctx context.Context, tc CommandRunner, args string,
-	env map[string]string, paths []AllowedPath,
-) (rawOutput string, exitCode int) {
-	resp, err := tc.Run(ctx, RunRequest{
-		Command:      args,
-		Env:          env,
-		AllowedPaths: paths,
-	})
-	if err != nil {
-		slog.Error("temenos exec failure", "args", args, "error", err)
-		return fmt.Sprintf("execution error: %v", err), -1
-	}
-
-	output := resp.Stdout
-	if resp.Stderr != "" {
-		output += "\nSTDERR:\n" + resp.Stderr
-	}
-	if output == "" {
-		output = "(no output)"
-	}
-	return output, resp.ExitCode
-}
-
-// scanAllCommands extracts all § commands from text, in order.
-// Commands are only recognized inside <cmd>...</cmd> blocks.
-// Bare § lines outside blocks are treated as prose and ignored.
-// Returns the text before the first <cmd> block and a slice of commands.
-func scanAllCommands(text string) (preText string, cmds []Command) {
-	remaining := text
-	firstBlockIdx := strings.Index(remaining, "<cmd>")
+// scanBlocks extracts raw content from <cmd>...</cmd> blocks in text.
+// Returns the text before the first block and a slice of raw block contents.
+// Bare text outside blocks is treated as prose.
+func scanBlocks(text string) (preText string, blocks []string) {
+	firstBlockIdx := strings.Index(text, "<cmd>")
 	if firstBlockIdx == -1 {
-		return text, nil // no commands
+		return text, nil
 	}
-	preText = remaining[:firstBlockIdx]
+	preText = text[:firstBlockIdx]
+	remaining := text[firstBlockIdx:] // start from first block, avoiding a redundant search
 
 	for {
 		openIdx := strings.Index(remaining, "<cmd>")
@@ -312,51 +304,23 @@ func scanAllCommands(text string) (preText string, cmds []Command) {
 		closeIdx := strings.Index(remaining[openIdx:], "</cmd>")
 		var blockContent string
 		if closeIdx == -1 {
-			// Unclosed block — take rest as block content and warn
 			blockContent = remaining[openIdx+len("<cmd>"):]
 			remaining = ""
-			slog.Warn("logos: unclosed <cmd> block, executing commands from partial block")
+			slog.Warn("logos: unclosed <cmd> block, sending partial block to temenos")
 		} else {
 			blockContent = remaining[openIdx+len("<cmd>") : openIdx+closeIdx]
 			remaining = remaining[openIdx+closeIdx+len("</cmd>"):]
 		}
 
-		// Parse § lines within the block, reusing heredoc logic.
-		lines := strings.Split(blockContent, "\n")
-		var heredocDelim string
-		for i, line := range lines {
-			if heredocDelim != "" {
-				if isHeredocClose(line, heredocDelim) {
-					heredocDelim = ""
-				}
-				continue
-			}
-			c, ok := ParseCommand(line)
-			if !ok {
-				continue
-			}
-			if delim, hasHeredoc := heredocDelimiter(c.Args); hasHeredoc {
-				var body strings.Builder
-				body.WriteString(c.Args)
-				heredocDelim = delim
-				for j := i + 1; j < len(lines); j++ {
-					body.WriteString("\n" + lines[j])
-					if isHeredocClose(lines[j], delim) {
-						heredocDelim = ""
-						break
-					}
-				}
-				cmds = append(cmds, Command{Raw: c.Raw, Args: body.String()})
-			} else {
-				cmds = append(cmds, c)
-			}
+		if blockContent != "" {
+			blocks = append(blocks, blockContent)
 		}
 
 		if remaining == "" {
 			break
 		}
 	}
-	return preText, cmds
+	return preText, blocks
 }
 
 // streamFilter sits between the LLM stream and OnDelta, filtering XML tool_call

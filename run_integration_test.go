@@ -62,14 +62,14 @@ func (m *mockLanguageModel) Stream(_ context.Context, _ fantasy.Call) (fantasy.S
 	}, nil
 }
 
-// mockRunner implements CommandRunner for unit tests.
-type mockRunner struct {
-	response RunResponse
+// mockBlockRunner implements BlockRunner for unit tests.
+type mockBlockRunner struct {
+	response RunBlockResponse
 	err      error
-	calls    []RunRequest
+	calls    []RunBlockRequest
 }
 
-func (m *mockRunner) Run(_ context.Context, req RunRequest) (*RunResponse, error) {
+func (m *mockBlockRunner) RunBlock(_ context.Context, req RunBlockRequest) (*RunBlockResponse, error) {
 	m.calls = append(m.calls, req)
 	if m.err != nil {
 		return nil, m.err
@@ -80,7 +80,7 @@ func (m *mockRunner) Run(_ context.Context, req RunRequest) (*RunResponse, error
 
 // newTestTemenosServer starts a fake temenos HTTP server over a unix socket.
 // Uses os.MkdirTemp with a short prefix to avoid macOS unix socket path length limit (104 chars).
-func newTestTemenosServer(t *testing.T, handler http.HandlerFunc) CommandRunner {
+func newTestTemenosServer(t *testing.T, handler http.HandlerFunc) BlockRunner {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "tm")
 	require.NoError(t, err)
@@ -96,7 +96,7 @@ func newTestTemenosServer(t *testing.T, handler http.HandlerFunc) CommandRunner 
 	return tc
 }
 
-func newCfg(model fantasy.LanguageModel, runner CommandRunner) Config {
+func newCfg(model fantasy.LanguageModel, runner BlockRunner) Config {
 	return Config{
 		Provider: &mockProvider{model: model},
 		Model:    "test",
@@ -179,7 +179,7 @@ func TestRun_NilTemenos(t *testing.T) {
 
 func TestRun_NoCommand_ReturnsImmediately(t *testing.T) {
 	model := &mockLanguageModel{responses: []string{"Here is the answer."}}
-	runner := &mockRunner{}
+	runner := &mockBlockRunner{}
 	result, err := Run(context.Background(), newCfg(model, runner), nil, "question", Callbacks{})
 	require.NoError(t, err)
 	assert.Equal(t, "Here is the answer.", result.Response)
@@ -193,7 +193,9 @@ func TestRun_OneCommandThenDone(t *testing.T) {
 		"Let me check.\n<cmd>\n§ ls -la\n</cmd>",
 		"The files are: main.go",
 	}}
-	runner := &mockRunner{response: RunResponse{Stdout: "main.go\ngo.mod"}}
+	runner := &mockBlockRunner{response: RunBlockResponse{Results: []CommandResult{
+		{Command: "ls -la", Stdout: "main.go\ngo.mod"},
+	}}}
 	result, err := Run(context.Background(), newCfg(model, runner), nil, "list files", Callbacks{})
 	require.NoError(t, err)
 	assert.Equal(t, "Let me check.\n", result.Response[:len("Let me check.\n")])
@@ -203,7 +205,7 @@ func TestRun_OneCommandThenDone(t *testing.T) {
 	assert.Equal(t, StepRoleResult, result.Steps[1].Role)
 	assert.True(t, strings.HasPrefix(result.Steps[1].Content, "<result>\n§ "))
 	require.Len(t, runner.calls, 1)
-	assert.Equal(t, "ls -la", runner.calls[0].Command) // exact command forwarded unchanged
+	assert.Equal(t, "\n§ ls -la\n", runner.calls[0].Block) // raw block content forwarded
 }
 
 func TestRun_MaxStepsExhausted(t *testing.T) {
@@ -213,13 +215,15 @@ func TestRun_MaxStepsExhausted(t *testing.T) {
 		responses[i] = "<cmd>\n§ echo loop\n</cmd>"
 	}
 	model := &mockLanguageModel{responses: responses}
-	runner := &mockRunner{response: RunResponse{Stdout: "loop"}}
+	runner := &mockBlockRunner{response: RunBlockResponse{Results: []CommandResult{
+		{Command: "echo loop", Stdout: "loop"},
+	}}}
 	cfg := newCfg(model, runner)
 	cfg.MaxSteps = 3
 	result, err := Run(context.Background(), cfg, nil, "go", Callbacks{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "max steps")
-	assert.Len(t, runner.calls, 3) // exactly MaxSteps commands executed
+	assert.Len(t, runner.calls, 3) // exactly MaxSteps blocks executed
 	assert.Len(t, result.Steps, 6) // 3 assistant + 3 result steps
 }
 
@@ -228,7 +232,9 @@ func TestRun_SandboxNonZeroExitIncludedInOutput(t *testing.T) {
 		"<cmd>\n§ false\n</cmd>",
 		"got it",
 	}}
-	runner := &mockRunner{response: RunResponse{Stderr: "error msg", ExitCode: 1}}
+	runner := &mockBlockRunner{response: RunBlockResponse{Results: []CommandResult{
+		{Command: "false", Stderr: "error msg", ExitCode: 1},
+	}}}
 	result, err := Run(context.Background(), newCfg(model, runner), nil, "run", Callbacks{})
 	require.NoError(t, err)
 	assert.Equal(t, StepRoleResult, result.Steps[1].Role)
@@ -237,36 +243,28 @@ func TestRun_SandboxNonZeroExitIncludedInOutput(t *testing.T) {
 	assert.Contains(t, result.Steps[1].Content, "error msg")
 }
 
-func TestRun_OnCommandStartCallback(t *testing.T) {
-	model := &mockLanguageModel{responses: []string{"<cmd>\n§ ls\n</cmd>", "done"}}
-	runner := &mockRunner{response: RunResponse{Stdout: "file.go"}}
-	var called []string
-	cbs := Callbacks{OnCommandStart: func(cmd string) { called = append(called, cmd) }}
-	_, err := Run(context.Background(), newCfg(model, runner), nil, "q", cbs)
-	require.NoError(t, err)
-	assert.Equal(t, []string{"ls"}, called)
-}
-
 func TestRun_OnCommandResultCallback(t *testing.T) {
 	model := &mockLanguageModel{responses: []string{"<cmd>\n§ echo hello\n</cmd>", "done"}}
-	runner := &mockRunner{response: RunResponse{Stdout: "hello", ExitCode: 0}}
+	runner := &mockBlockRunner{response: RunBlockResponse{Results: []CommandResult{
+		{Command: "echo hello", Stdout: "hello", ExitCode: 0},
+	}}}
 	var events []string
 	cbs := Callbacks{
-		OnCommandStart: func(cmd string) { events = append(events, "start:"+cmd) },
 		OnCommandResult: func(cmd, output string, exitCode int) {
 			events = append(events, fmt.Sprintf("result:%s:%s:%d", cmd, output, exitCode))
 		},
 	}
 	_, err := Run(context.Background(), newCfg(model, runner), nil, "q", cbs)
 	require.NoError(t, err)
-	require.Len(t, events, 2)
-	assert.Equal(t, "start:echo hello", events[0])
-	assert.Equal(t, "result:echo hello:hello:0", events[1])
+	require.Len(t, events, 1)
+	assert.Equal(t, "result:echo hello:hello:0", events[0])
 }
 
 func TestRun_OnCommandResultCallback_NonZeroExit(t *testing.T) {
 	model := &mockLanguageModel{responses: []string{"<cmd>\n§ false\n</cmd>", "done"}}
-	runner := &mockRunner{response: RunResponse{Stderr: "err msg", ExitCode: 1}}
+	runner := &mockBlockRunner{response: RunBlockResponse{Results: []CommandResult{
+		{Command: "false", Stderr: "err msg", ExitCode: 1},
+	}}}
 	var resultOutput string
 	var resultExitCode int
 	cbs := Callbacks{
@@ -285,23 +283,6 @@ func TestRun_OnCommandResultCallback_NonZeroExit(t *testing.T) {
 	assert.Contains(t, result.Steps[1].Content, "(exit code: 1)")
 }
 
-func TestRun_OnCommandResultCallback_TransportError(t *testing.T) {
-	model := &mockLanguageModel{responses: []string{"<cmd>\n§ ls\n</cmd>", "done"}}
-	runner := &mockRunner{err: fmt.Errorf("socket closed")}
-	var callbackOutput string
-	var callbackExitCode int
-	cbs := Callbacks{
-		OnCommandResult: func(cmd, output string, exitCode int) {
-			callbackOutput = output
-			callbackExitCode = exitCode
-		},
-	}
-	_, err := Run(context.Background(), newCfg(model, runner), nil, "q", cbs)
-	require.NoError(t, err) // transport failure is surfaced to LLM, not as Run() error
-	assert.Equal(t, -1, callbackExitCode)
-	assert.Contains(t, callbackOutput, "execution error:")
-}
-
 func TestRun_XMLRetry_RecoversToCommand(t *testing.T) { //nolint:dupl
 	// Turn 1: model outputs XML (detected by streaming filter). Turn 2: corrects to § command. Turn 3: done.
 	model := &mockLanguageModel{responses: []string{
@@ -309,7 +290,9 @@ func TestRun_XMLRetry_RecoversToCommand(t *testing.T) { //nolint:dupl
 		"<cmd>\n§ rg foo /path\n</cmd>",
 		"Found it.",
 	}}
-	runner := &mockRunner{response: RunResponse{Stdout: "foo.go:1: foo"}}
+	runner := &mockBlockRunner{response: RunBlockResponse{Results: []CommandResult{
+		{Command: "rg foo /path", Stdout: "foo.go:1: foo"},
+	}}}
 
 	var retryCalls []string
 	cbs := Callbacks{
@@ -319,8 +302,8 @@ func TestRun_XMLRetry_RecoversToCommand(t *testing.T) { //nolint:dupl
 	result, err := Run(context.Background(), newCfg(model, runner), nil, "find foo", cbs)
 	require.NoError(t, err)
 	assert.Contains(t, result.Response, "Found it.")
-	require.Len(t, runner.calls, 1) // command executed exactly once after recovery
-	assert.Equal(t, "rg foo /path", runner.calls[0].Command)
+	require.Len(t, runner.calls, 1) // block executed exactly once after recovery
+	assert.Equal(t, "\n§ rg foo /path\n", runner.calls[0].Block)
 	assert.Equal(t, []string{"tool_call"}, retryCalls)
 
 	// Steps: bad_assistant (assistant), directive (result), rg turn (assistant), result (result), final (assistant)
@@ -345,7 +328,7 @@ func TestRun_XMLRetry_ConsumesNormalSteps(t *testing.T) {
 		responses[i] = xmlResponse
 	}
 	model := &mockLanguageModel{responses: responses}
-	runner := &mockRunner{}
+	runner := &mockBlockRunner{}
 
 	var retryCalls []string
 	cbs := Callbacks{
@@ -373,7 +356,7 @@ func TestRun_XMLRetry_ThinkTagStripped(t *testing.T) {
 	model := &mockLanguageModel{responses: []string{
 		"<think>reasoning</think>Here is the result",
 	}}
-	runner := &mockRunner{}
+	runner := &mockBlockRunner{}
 	var deltaOutput string
 	cbs := Callbacks{
 		OnDelta: func(text string) { deltaOutput += text },
@@ -393,18 +376,19 @@ func TestRun_MultiCommand_ExecutesAll(t *testing.T) {
 		"Let me check.\n<cmd>\n§ pwd\n§ ls -la\n</cmd>",
 		"Found the files.",
 	}}
-	runner := &mockRunner{response: RunResponse{Stdout: "ok"}}
+	runner := &mockBlockRunner{response: RunBlockResponse{Results: []CommandResult{
+		{Command: "pwd", Stdout: "ok"},
+		{Command: "ls -la", Stdout: "ok"},
+	}}}
 	var resultCmds []string
 	cbs := Callbacks{
-		OnCommandStart:  func(cmd string) {},
 		OnCommandResult: func(cmd string, output string, exitCode int) { resultCmds = append(resultCmds, cmd) },
 	}
 	result, err := Run(context.Background(), newCfg(model, runner), nil, "check", cbs)
 	require.NoError(t, err)
 	assert.Contains(t, result.Response, "Found the files.")
-	require.Len(t, runner.calls, 2)
-	assert.Equal(t, "pwd", runner.calls[0].Command)
-	assert.Equal(t, "ls -la", runner.calls[1].Command)
+	require.Len(t, runner.calls, 1) // one block with two commands = one RunBlock call
+	assert.Equal(t, "\n§ pwd\n§ ls -la\n", runner.calls[0].Block)
 	assert.Equal(t, []string{"pwd", "ls -la"}, resultCmds)
 }
 
@@ -413,7 +397,10 @@ func TestRun_MultiCommand_ExitCodeFormatted(t *testing.T) {
 		"<cmd>\n§ false\n§ echo ok\n</cmd>",
 		"Got it.",
 	}}
-	runner := &mockRunner{response: RunResponse{Stderr: "error", ExitCode: 1}}
+	runner := &mockBlockRunner{response: RunBlockResponse{Results: []CommandResult{
+		{Command: "false", Stderr: "error", ExitCode: 1},
+		{Command: "echo ok", Stderr: "error", ExitCode: 1},
+	}}}
 	result, err := Run(context.Background(), newCfg(model, runner), nil, "run", Callbacks{})
 	require.NoError(t, err)
 	cmdStep := result.Steps[1]
@@ -426,26 +413,15 @@ func TestRun_MultiCommand_WithHeredoc(t *testing.T) {
 		"<cmd>\n§ cat <<'EOF'\nhello\nEOF\n§ ls -la\n</cmd>",
 		"Done.",
 	}}
-	runner := &mockRunner{response: RunResponse{Stdout: "ok"}}
+	runner := &mockBlockRunner{response: RunBlockResponse{Results: []CommandResult{
+		{Command: "cat <<'EOF'\nhello\nEOF", Stdout: "ok"},
+		{Command: "ls -la", Stdout: "ok"},
+	}}}
 	result, err := Run(context.Background(), newCfg(model, runner), nil, "go", Callbacks{})
 	require.NoError(t, err)
 	assert.Contains(t, result.Response, "Done.")
-	require.Len(t, runner.calls, 2)
-	assert.Equal(t, "cat <<'EOF'\nhello\nEOF", runner.calls[0].Command)
-	assert.Equal(t, "ls -la", runner.calls[1].Command)
-}
-
-func TestRun_MultiCommand_OnCommandStartPerCommand(t *testing.T) {
-	model := &mockLanguageModel{responses: []string{
-		"<cmd>\n§ pwd\n§ ls\n§ echo hi\n</cmd>",
-		"All done.",
-	}}
-	runner := &mockRunner{response: RunResponse{Stdout: "ok"}}
-	var started []string
-	cbs := Callbacks{OnCommandStart: func(cmd string) { started = append(started, cmd) }}
-	_, err := Run(context.Background(), newCfg(model, runner), nil, "go", cbs)
-	require.NoError(t, err)
-	assert.Equal(t, []string{"pwd", "ls", "echo hi"}, started)
+	require.Len(t, runner.calls, 1) // one block with two commands = one RunBlock call
+	assert.Equal(t, "\n§ cat <<'EOF'\nhello\nEOF\n§ ls -la\n", runner.calls[0].Block)
 }
 
 func TestRun_ConsecutiveCommands_NoWarningInjected(t *testing.T) {
@@ -460,7 +436,9 @@ func TestRun_ConsecutiveCommands_NoWarningInjected(t *testing.T) {
 		"Done.",
 	}
 	model := &mockLanguageModel{responses: responses}
-	runner := &mockRunner{response: RunResponse{Stdout: "ok"}}
+	runner := &mockBlockRunner{response: RunBlockResponse{Results: []CommandResult{
+		{Command: "echo", Stdout: "ok"},
+	}}}
 	result, err := Run(context.Background(), newCfg(model, runner), nil, "go", Callbacks{})
 	require.NoError(t, err)
 	for _, s := range result.Steps {
@@ -472,35 +450,58 @@ func TestRun_ConsecutiveCommands_NoWarningInjected(t *testing.T) {
 }
 
 func TestRun_HeredocCommand_FullBlockSentToRunner(t *testing.T) {
-	// Model issues a heredoc command — runner must receive the complete multi-line block.
+	// Model issues a heredoc command — runner must receive the complete raw block.
 	model := &mockLanguageModel{responses: []string{
 		"<cmd>\n§ cat <<'EOF'\nline1\nline2\nEOF\n</cmd>",
 		"Created.",
 	}}
-	runner := &mockRunner{response: RunResponse{Stdout: "ok"}}
+	runner := &mockBlockRunner{response: RunBlockResponse{Results: []CommandResult{
+		{Command: "cat <<'EOF'\nline1\nline2\nEOF", Stdout: "ok"},
+	}}}
 	result, err := Run(context.Background(), newCfg(model, runner), nil, "write file", Callbacks{})
 	require.NoError(t, err)
 	assert.Contains(t, result.Response, "Created.")
 	require.Len(t, runner.calls, 1)
-	assert.Equal(t, "cat <<'EOF'\nline1\nline2\nEOF", runner.calls[0].Command)
+	assert.Equal(t, "\n§ cat <<'EOF'\nline1\nline2\nEOF\n", runner.calls[0].Block)
 }
 
 // TestRun_HttpServer_JsonEncodingRoundtrip verifies that the real temenos client
 // correctly encodes requests and decodes responses end-to-end over a unix socket.
+// Also verifies that Config.Prefix is forwarded correctly in the request.
 func TestRun_HttpServer_JsonEncodingRoundtrip(t *testing.T) {
-	var receivedCmd string
+	var receivedReq RunBlockRequest
 	tc := newTestTemenosServer(t, func(w http.ResponseWriter, r *http.Request) {
-		var req RunRequest
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
-		receivedCmd = req.Command
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&receivedReq))
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(RunResponse{Stdout: "ok", ExitCode: 0}) //nolint:errcheck
+		json.NewEncoder(w).Encode(RunBlockResponse{Results: []CommandResult{ //nolint:errcheck
+			{Command: "echo hi", Stdout: "ok", ExitCode: 0},
+		}})
 	})
 	model := &mockLanguageModel{responses: []string{"<cmd>\n§ echo hi\n</cmd>", "done"}}
 	cfg := newCfg(model, tc)
 	_, err := Run(context.Background(), cfg, nil, "test", Callbacks{})
 	require.NoError(t, err)
-	assert.Equal(t, "echo hi", receivedCmd)
+	assert.Equal(t, "\n§ echo hi\n", receivedReq.Block)
+	assert.Equal(t, "§ ", receivedReq.Prefix) // default prefix forwarded to temenos
+}
+
+func TestRun_RunBlockTransportError_CallbackNotFired(t *testing.T) {
+	// Verifies the documented behavioral change: transport errors (RunBlock fails entirely)
+	// do NOT fire OnCommandResult — there's no meaningful command/exitCode to report.
+	// The error text is still surfaced to the LLM via the <result> step.
+	model := &mockLanguageModel{responses: []string{"<cmd>\n§ ls\n</cmd>", "done"}}
+	runner := &mockBlockRunner{err: fmt.Errorf("socket closed")}
+	var callbackFired bool
+	cbs := Callbacks{
+		OnCommandResult: func(cmd, output string, exitCode int) {
+			callbackFired = true
+		},
+	}
+	result, err := Run(context.Background(), newCfg(model, runner), nil, "q", cbs)
+	require.NoError(t, err) // transport failure is surfaced to LLM, not as Run() error
+	assert.False(t, callbackFired, "OnCommandResult should NOT be called on transport error")
+	require.Len(t, result.Steps, 3) // assistant, result, final
+	assert.Contains(t, result.Steps[1].Content, "execution error:")
 }
 
 func TestRun_ReasoningCaptured(t *testing.T) {
@@ -509,7 +510,7 @@ func TestRun_ReasoningCaptured(t *testing.T) {
 		signature: "sig123",
 		text:      "The answer is 42.",
 	}
-	runner := &mockRunner{}
+	runner := &mockBlockRunner{}
 	result, err := Run(context.Background(), newCfg(model, runner), nil, "question", Callbacks{})
 	require.NoError(t, err)
 	require.Len(t, result.Steps, 1)
@@ -520,7 +521,7 @@ func TestRun_ReasoningCaptured(t *testing.T) {
 
 func TestRun_NoReasoning_BackwardCompat(t *testing.T) {
 	model := &mockLanguageModel{responses: []string{"simple answer"}}
-	runner := &mockRunner{}
+	runner := &mockBlockRunner{}
 	result, err := Run(context.Background(), newCfg(model, runner), nil, "question", Callbacks{})
 	require.NoError(t, err)
 	assert.Empty(t, result.Steps[0].Reasoning)
@@ -533,7 +534,9 @@ func TestRun_OnDelta_IncludesCmdBlockContent(t *testing.T) {
 		"Before block.\n<cmd>\n§ ls\n</cmd>",
 		"After command.",
 	}}
-	runner := &mockRunner{response: RunResponse{Stdout: "file.txt", ExitCode: 0}}
+	runner := &mockBlockRunner{response: RunBlockResponse{Results: []CommandResult{
+		{Command: "ls", Stdout: "file.txt", ExitCode: 0},
+	}}}
 	var deltas []string
 	cbs := Callbacks{OnDelta: func(text string) { deltas = append(deltas, text) }}
 	_, err := Run(context.Background(), newCfg(model, runner), nil, "list files", cbs)
@@ -601,7 +604,9 @@ func TestRun_ReasoningCaptured_WithCommand(t *testing.T) {
 		reasoning: "I should check files first.",
 		signature: "sigABC",
 	}
-	runner := &mockRunner{response: RunResponse{Stdout: "main.go", ExitCode: 0}}
+	runner := &mockBlockRunner{response: RunBlockResponse{Results: []CommandResult{
+		{Command: "ls", Stdout: "main.go", ExitCode: 0},
+	}}}
 	result, err := Run(context.Background(), newCfg(model, runner), nil, "find files", Callbacks{})
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, len(result.Steps), 2)
