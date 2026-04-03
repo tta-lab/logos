@@ -45,6 +45,41 @@ func TestScanCommands(t *testing.T) {
 	}
 }
 
+func TestParseMessage(t *testing.T) {
+	tests := []struct {
+		name              string
+		text              string
+		wantCmds          []string
+		wantProseContains string
+	}{
+		{"no blocks", "Hello world", nil, "Hello world"},
+		{"one block", "Before <cmd>ls</cmd> after", []string{"ls"}, "Before "},
+		{"block at start", "<cmd>ls</cmd> after", []string{"ls"}, " after"},
+		{"block at end", "before <cmd>ls</cmd>", []string{"ls"}, "before "},
+		{"multiple blocks", "a <cmd>x</cmd> b <cmd>y</cmd> c", []string{"x", "y"}, "a  b  c"},
+		{"nested heredoc", "text <cmd>cat <<EOF\nhello <cmd> world\nEOF</cmd> more", []string{"cat <<EOF\nhello <cmd> world\nEOF"}, "text  more"},
+		{"content after nested", "<cmd>start <cmd>nested</cmd> middle</cmd> end", []string{"start <cmd>nested</cmd> middle"}, " end"},
+		{"deeply nested", "<cmd>a <cmd>b <cmd>c</cmd> d</cmd> e", []string{"a <cmd>b <cmd>c</cmd> d"}, " e"},
+		{"empty nested", "<cmd><cmd></cmd></cmd>", []string{"<cmd></cmd>"}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmds, prose := ParseMessage(tt.text)
+			if len(cmds) != len(tt.wantCmds) {
+				t.Errorf("commands: got %d, want %d: %v", len(cmds), len(tt.wantCmds), cmds)
+			}
+			for i := range cmds {
+				if cmds[i] != tt.wantCmds[i] {
+					t.Errorf("command[%d] = %q, want %q", i, cmds[i], tt.wantCmds[i])
+				}
+			}
+			if !strings.Contains(prose, tt.wantProseContains) {
+				t.Errorf("prose = %q, want to contain %q", prose, tt.wantProseContains)
+			}
+		})
+	}
+}
+
 // --- streamFilter tests ---
 
 func TestStreamFilter_FastPath_NoAngle(t *testing.T) {

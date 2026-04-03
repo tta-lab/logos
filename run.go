@@ -309,6 +309,91 @@ func scanCommands(text string) []string {
 	return cmds
 }
 
+// ParseMessage parses a raw message that may contain <cmd>...</cmd> blocks.
+// Returns:
+//   - commands: extracted command contents (for execution)
+//   - prose: message with all <cmd> blocks stripped (for display to human)
+//
+// Nested <cmd> inside blocks are treated as content and preserved.
+func ParseMessage(text string) (commands []string, prose string) {
+	var cmdBuf strings.Builder
+	var proseBuf strings.Builder
+	depth := 0
+
+	for i := 0; i < len(text); {
+		if depth == 0 {
+			// Look for next <cmd>
+			idx := strings.Index(text[i:], CmdBlockOpen)
+			if idx == -1 {
+				proseBuf.WriteString(text[i:])
+				break
+			}
+			proseBuf.WriteString(text[i : i+idx])
+			i += idx + len(CmdBlockOpen)
+			depth = 1
+			cmdBuf.Reset()
+			continue
+		}
+
+		// At depth >= 1: look for </cmd>
+		closeIdx := strings.Index(text[i:], CmdBlockClose)
+		if closeIdx == -1 {
+			break
+		}
+
+		// Check for nested <cmd> before this </cmd>
+		nestedIdx := strings.Index(text[i:], CmdBlockOpen)
+
+		if nestedIdx != -1 && nestedIdx < closeIdx {
+			// Nested <cmd> found first — it's content
+			nestedCloseIdx := strings.Index(text[i+nestedIdx:], CmdBlockClose)
+			if nestedCloseIdx == -1 {
+				cmdBuf.WriteString(text[i:])
+				break
+			}
+			// Copy content before nested <cmd> + the nested block
+			cmdBuf.WriteString(text[i : i+nestedIdx+nestedCloseIdx+len(CmdBlockClose)])
+			i += nestedIdx + nestedCloseIdx + len(CmdBlockClose)
+
+			// Heredoc case: nested </cmd> was the last </cmd> in the string
+			// Check if there are more </cmd> tags after current position
+			remainingAfterNested := text[i:]
+			nextCloseIdx := strings.Index(remainingAfterNested, CmdBlockClose)
+			if nextCloseIdx == -1 {
+				// No more </cmd> — this nested close is the outer close
+				emitLen := cmdBuf.Len() - len(CmdBlockClose)
+				cmd := strings.TrimSpace(cmdBuf.String()[:emitLen])
+				if cmd != "" {
+					commands = append(commands, cmd)
+				}
+				proseBuf.WriteString(remainingAfterNested)
+				return commands, proseBuf.String()
+			}
+			// More </cmd> ahead — outer close is different, continue scanning
+			continue
+		}
+
+		// Found </cmd> before any nested <cmd>
+		if depth == 1 {
+			cmdBuf.WriteString(text[i : i+closeIdx])
+			cmd := strings.TrimSpace(cmdBuf.String())
+			if cmd != "" {
+				commands = append(commands, cmd)
+			}
+			i += closeIdx + len(CmdBlockClose)
+			depth = 0
+			continue
+		}
+
+		// depth >= 2: nested </cmd> — skip it
+		i += closeIdx + len(CmdBlockClose)
+		depth--
+		continue
+	}
+
+	return commands, proseBuf.String()
+}
+
 // executeCommands sends each command to temenos individually and formats results.
 // Fires OnCommandResult callback per command result.
 //
