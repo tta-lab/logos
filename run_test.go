@@ -25,6 +25,9 @@ func TestScanCommands(t *testing.T) {
 		{"nested cmd in echo arg", "<cmd>\necho hello <cmd> world\n</cmd>", []string{"echo hello <cmd> world"}},
 		{"multiple nested cmd blocks", "<cmd>\ncmd1\n</cmd><cmd>\ncmd2\n</cmd>", []string{"cmd1", "cmd2"}},
 		{"content after nested cmd preserved", "<cmd>\nouter start <cmd>nested</cmd> middle\n</cmd>", []string{"outer start <cmd>nested</cmd> middle"}},
+		{"open in content preserved", "<cmd>echo <cmd></cmd></cmd>", []string{"echo <cmd></cmd>"}},
+		{"deeply nested", "<cmd>a <cmd>b <cmd>c</cmd> d</cmd> e\n</cmd>", []string{"a <cmd>b <cmd>c</cmd> d"}},
+		{"empty nested preserved as content", "<cmd>\n<cmd></cmd>\n</cmd>", []string{"<cmd></cmd>"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
