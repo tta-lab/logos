@@ -49,10 +49,3 @@ var bracketToolCallMarkers = []string{
 func containsBracketToolCall(text string) bool {
 	return toolCallBracketRe.MatchString(text)
 }
-
-// stripMarkers are substrings to silently strip from streaming output.
-// Used to remove thinking tag leaks without triggering a retry.
-var stripMarkers = []string{
-	"</think>",
-	"<think>",
-}

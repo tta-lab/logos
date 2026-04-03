@@ -8,35 +8,102 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestScanBlocks(t *testing.T) {
+func TestScanCommands(t *testing.T) {
 	tests := []struct {
-		name       string
-		text       string
-		wantPre    string
-		wantBlocks []string
+		name     string
+		text     string
+		wantCmds []string
 	}{
-		{"no blocks", "Just text.", "Just text.", nil},
-		{"one block", "<cmd>\n§ ls -la\n</cmd>", "", []string{"\n§ ls -la\n"}},
-		{"text before block", "Let me check.\n<cmd>\n§ pwd\n</cmd>", "Let me check.\n", []string{"\n§ pwd\n"}},
-		{"bare § outside block", "§ ls -la", "§ ls -la", nil},
-		{"multiple blocks", "<cmd>\n§ ls\n</cmd>text<cmd>\n§ pwd\n</cmd>", "", []string{"\n§ ls\n", "\n§ pwd\n"}},
-		{"unclosed block", "<cmd>\n§ ls", "", []string{"\n§ ls"}},
-		{"empty block", "<cmd></cmd>", "", nil},
+		{"no blocks", "Just text.", nil},
+		{"one block", "<cmd>\nls -la\n</cmd>", []string{"ls -la"}},
+		{"text before block", "Let me check.\n<cmd>\npwd\n</cmd>", []string{"pwd"}},
+		{"bare cmd outside block (prose)", "ls -la", nil},
+		{"multiple blocks", "<cmd>\nls\n</cmd>text<cmd>\npwd\n</cmd>", []string{"ls", "pwd"}},
+		{"unclosed block discarded", "<cmd>\nls", nil},
+		{"empty block", "<cmd></cmd>", nil},
+		{"nested cmd in heredoc treated as content",
+			"<cmd>\ncat <<'EOF'\nhello <cmd> world\nEOF\n</cmd>",
+			[]string{"cat <<'EOF'\nhello <cmd> world\nEOF"}},
+		{"nested cmd in echo arg", "<cmd>\necho hello <cmd> world\n</cmd>", []string{"echo hello <cmd> world"}},
+		{"multiple nested cmd blocks", "<cmd>\ncmd1\n</cmd><cmd>\ncmd2\n</cmd>", []string{"cmd1", "cmd2"}},
+		{"content after nested cmd preserved",
+			"<cmd>\nouter start <cmd>nested</cmd> middle\n</cmd>",
+			[]string{"outer start <cmd>nested</cmd> middle"}},
+		{"open in content preserved", "<cmd>echo <cmd></cmd></cmd>", []string{"echo <cmd></cmd>"}},
+		{"deeply nested", "<cmd>a <cmd>b <cmd>c</cmd> d</cmd> e\n</cmd>", []string{"a <cmd>b <cmd>c</cmd> d"}},
+		{"empty nested preserved as content", "<cmd>\n<cmd></cmd>\n</cmd>", []string{"<cmd></cmd>"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			preText, blocks := scanBlocks(tt.text)
-			if preText != tt.wantPre {
-				t.Errorf("preText = %q, want %q", preText, tt.wantPre)
-			}
-			if len(blocks) != len(tt.wantBlocks) {
-				t.Errorf("got %d blocks, want %d: %v", len(blocks), len(tt.wantBlocks), blocks)
+			cmds := scanCommands(tt.text)
+			if len(cmds) != len(tt.wantCmds) {
+				t.Errorf("got %d commands, want %d: %v", len(cmds), len(tt.wantCmds), cmds)
 				return
 			}
-			for i := range blocks {
-				if blocks[i] != tt.wantBlocks[i] {
-					t.Errorf("block[%d] = %q, want %q", i, blocks[i], tt.wantBlocks[i])
+			for i := range cmds {
+				if cmds[i] != tt.wantCmds[i] {
+					t.Errorf("cmd[%d] = %q, want %q", i, cmds[i], tt.wantCmds[i])
 				}
+			}
+		})
+	}
+}
+
+func TestParseMessage(t *testing.T) {
+	tests := []struct {
+		name      string
+		text      string
+		wantCmds  []string
+		wantProse string
+	}{
+		// Basic cases
+		{"no blocks", "Hello world", nil, "Hello world"},
+		{"one block", "Before <cmd>ls</cmd> after", []string{"ls"}, "Before  after"},
+		{"block at start", "<cmd>ls</cmd> after", []string{"ls"}, " after"},
+		{"block at end", "before <cmd>ls</cmd>", []string{"ls"}, "before "},
+		{"only block", "<cmd>ls</cmd>", []string{"ls"}, ""},
+		{"just text", "Just prose.", nil, "Just prose."},
+
+		// Multiple blocks
+		{"multiple blocks", "a <cmd>x</cmd> b <cmd>y</cmd> c", []string{"x", "y"}, "a  b  c"},
+		{"consecutive blocks", "<cmd>a</cmd><cmd>b</cmd>", []string{"a", "b"}, ""},
+		{"text between blocks", "pre <cmd>cmd1</cmd> mid <cmd>cmd2</cmd> post", []string{"cmd1", "cmd2"}, "pre  mid  post"},
+
+		// Nested cases
+		{"nested heredoc", "text <cmd>cat <<EOF\nhello <cmd> world\nEOF</cmd> more",
+			[]string{"cat <<EOF\nhello <cmd> world\nEOF"}, "text  more"},
+		{"content after nested", "<cmd>start <cmd>nested</cmd> middle</cmd> end",
+			[]string{"start <cmd>nested</cmd> middle"}, " end"},
+		{"deeply nested", "<cmd>a <cmd>b <cmd>c</cmd> d</cmd> e", []string{"a <cmd>b <cmd>c</cmd> d"}, " e"},
+		{"empty nested", "<cmd><cmd></cmd></cmd>", []string{"<cmd></cmd>"}, ""},
+		{"echo nested", "<cmd>echo hello <cmd> world</cmd>", []string{"echo hello <cmd> world"}, ""},
+		{"empty nested with space", "<cmd>\n<cmd></cmd>\n</cmd>", []string{"<cmd></cmd>"}, ""},
+
+		// Edge cases
+		{"bare § outside block", "§ ls -la", nil, "§ ls -la"},
+		{"unclosed block", "<cmd>unclosed", nil, ""}, // unclosed blocks are discarded
+		{"empty block", "<cmd></cmd>", nil, ""},
+		{"only whitespace", "   ", nil, "   "},
+
+		// Unicode and special chars
+		{"unicode prose", "Hello 世界 <cmd>ls</cmd> 你好", []string{"ls"}, "Hello 世界  你好"},
+		{"special chars in cmd", "<cmd>echo 'hello world' | grep -E 'test\\d+'</cmd>",
+			[]string{"echo 'hello world' | grep -E 'test\\d+'"}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmds, prose := ParseMessage(tt.text)
+			if len(cmds) != len(tt.wantCmds) {
+				t.Errorf("commands: got %d, want %d: %v", len(cmds), len(tt.wantCmds), cmds)
+				return
+			}
+			for i := range cmds {
+				if cmds[i] != tt.wantCmds[i] {
+					t.Errorf("command[%d] = %q, want %q", i, cmds[i], tt.wantCmds[i])
+				}
+			}
+			if prose != tt.wantProse {
+				t.Errorf("prose = %q, want %q", prose, tt.wantProse)
 			}
 		})
 	}
@@ -84,41 +151,6 @@ func TestStreamFilter_Tier1_SplitAcrossDeltas(t *testing.T) {
 	}
 }
 
-func TestStreamFilter_Tier2_ThinkTagStripped(t *testing.T) {
-	var got []string
-	f := &streamFilter{delegate: func(s string) { got = append(got, s) }}
-	f.Write("</think>Here is the result")
-	f.Flush()
-	combined := ""
-	for _, s := range got {
-		combined += s
-	}
-	if combined != "Here is the result" {
-		t.Errorf("got %q, want %q", combined, "Here is the result")
-	}
-	if f.toolCallDetected {
-		t.Error("toolCallDetected should be false for think tag")
-	}
-}
-
-func TestStreamFilter_Tier2_ThinkTagSplit(t *testing.T) {
-	var got []string
-	f := &streamFilter{delegate: func(s string) { got = append(got, s) }}
-	f.Write("</thi")
-	f.Write("nk>result")
-	f.Flush()
-	combined := ""
-	for _, s := range got {
-		combined += s
-	}
-	if combined != "result" {
-		t.Errorf("got %q, want %q", combined, "result")
-	}
-	if f.toolCallDetected {
-		t.Error("toolCallDetected should be false")
-	}
-}
-
 func TestStreamFilter_HarmlessAngle_NotDetected(t *testing.T) {
 	var got []string
 	f := &streamFilter{delegate: func(s string) { got = append(got, s) }}
@@ -150,27 +182,11 @@ func TestStreamFilter_BufferAtStreamEnd(t *testing.T) {
 	}
 }
 
-func TestStreamFilter_Mixed_ThinkAndText(t *testing.T) {
-	var got []string
-	f := &streamFilter{delegate: func(s string) { got = append(got, s) }}
-	f.Write("before")
-	f.Write("</think>")
-	f.Write("after")
-	f.Flush()
-	combined := ""
-	for _, s := range got {
-		combined += s
-	}
-	if combined != "beforeafter" {
-		t.Errorf("got %q, want %q", combined, "beforeafter")
-	}
-}
-
-// --- cmdBlockFilter tests ---
+// --- cmdBlockBuffer tests ---
 
 func TestCmdBlockFilter_PassThrough(t *testing.T) {
 	var got []string
-	f := &cmdBlockFilter{delegate: func(s string) { got = append(got, s) }}
+	f := &cmdBlockBuffer{delegate: func(s string) { got = append(got, s) }}
 	f.Write("hello world")
 	f.Flush()
 	assert.Equal(t, []string{"hello world"}, got)
@@ -178,12 +194,12 @@ func TestCmdBlockFilter_PassThrough(t *testing.T) {
 
 func TestCmdBlockFilter_BlockBuffered(t *testing.T) {
 	var got []string
-	f := &cmdBlockFilter{delegate: func(s string) { got = append(got, s) }}
-	f.Write("before<cmd>\n§ ls\n</cmd>after")
+	f := &cmdBlockBuffer{delegate: func(s string) { got = append(got, s) }}
+	f.Write("before<cmd>\nls\n</cmd>after")
 	f.Flush()
 	// Block is emitted as a single chunk alongside prose
 	assert.Contains(t, got, "before")
-	assert.Contains(t, got, "<cmd>\n§ ls\n</cmd>")
+	assert.Contains(t, got, "<cmd>\nls\n</cmd>")
 	assert.Contains(t, got, "after")
 	// Verify order: "before" comes before the block, block comes before "after"
 	beforeIdx, blockIdx, afterIdx := -1, -1, -1
@@ -191,7 +207,7 @@ func TestCmdBlockFilter_BlockBuffered(t *testing.T) {
 		switch s {
 		case "before":
 			beforeIdx = i
-		case "<cmd>\n§ ls\n</cmd>":
+		case "<cmd>\nls\n</cmd>":
 			blockIdx = i
 		case "after":
 			afterIdx = i
@@ -206,15 +222,15 @@ func TestCmdBlockFilter_BlockBuffered(t *testing.T) {
 
 func TestCmdBlockFilter_SplitAcrossDeltas(t *testing.T) {
 	var got []string
-	f := &cmdBlockFilter{delegate: func(s string) { got = append(got, s) }}
+	f := &cmdBlockBuffer{delegate: func(s string) { got = append(got, s) }}
 	f.Write("text<cm")
-	f.Write("d>\n§ ls\n</cm")
+	f.Write("d>\nls\n</cm")
 	f.Write("d>more")
 	f.Flush()
 	combined := strings.Join(got, "")
 	// Block emitted as one atomic chunk after closing tag is assembled across deltas
 	assert.Contains(t, combined, "text")
-	assert.Contains(t, got, "<cmd>\n§ ls\n</cmd>", "block should be emitted as one atomic chunk")
+	assert.Contains(t, got, "<cmd>\nls\n</cmd>", "block should be emitted as one atomic chunk")
 	assert.Contains(t, combined, "more")
 	assert.True(t, strings.HasPrefix(combined, "text"), "expected 'text' first, got: %q", combined)
 	assert.True(t, strings.HasSuffix(combined, "more"), "expected 'more' at end, got: %q", combined)
@@ -222,33 +238,33 @@ func TestCmdBlockFilter_SplitAcrossDeltas(t *testing.T) {
 
 func TestCmdBlockFilter_UnclosedBlock(t *testing.T) {
 	var got []string
-	f := &cmdBlockFilter{delegate: func(s string) { got = append(got, s) }}
-	f.Write("text<cmd>\n§ ls")
+	f := &cmdBlockBuffer{delegate: func(s string) { got = append(got, s) }}
+	f.Write("text<cmd>\nls")
 	f.Flush()
 	combined := strings.Join(got, "")
 	// Prose before the block passes through; unclosed block is discarded
 	assert.Contains(t, combined, "text")
 	assert.NotContains(t, combined, "<cmd>")
-	assert.NotContains(t, combined, "§ ls")
+	assert.NotContains(t, combined, "ls")
 }
 
 func TestCmdBlockFilter_MultipleBlocksInOneWrite(t *testing.T) {
 	var got []string
-	f := &cmdBlockFilter{delegate: func(s string) { got = append(got, s) }}
-	f.Write("before<cmd>\n§ ls\n</cmd>middle<cmd>\n§ pwd\n</cmd>after")
+	f := &cmdBlockBuffer{delegate: func(s string) { got = append(got, s) }}
+	f.Write("before<cmd>\nls\n</cmd>middle<cmd>\npwd\n</cmd>after")
 	f.Flush()
 	combined := strings.Join(got, "")
 	// Both blocks and all prose are emitted
 	assert.Contains(t, combined, "before")
-	assert.Contains(t, combined, "<cmd>\n§ ls\n</cmd>")
+	assert.Contains(t, combined, "<cmd>\nls\n</cmd>")
 	assert.Contains(t, combined, "middle")
-	assert.Contains(t, combined, "<cmd>\n§ pwd\n</cmd>")
+	assert.Contains(t, combined, "<cmd>\npwd\n</cmd>")
 	assert.Contains(t, combined, "after")
 }
 
 func TestCmdBlockFilter_EmptyBlock(t *testing.T) {
 	var got []string
-	f := &cmdBlockFilter{delegate: func(s string) { got = append(got, s) }}
+	f := &cmdBlockBuffer{delegate: func(s string) { got = append(got, s) }}
 	f.Write("<cmd></cmd>")
 	f.Flush()
 	// Empty block is emitted as <cmd></cmd>
@@ -257,57 +273,57 @@ func TestCmdBlockFilter_EmptyBlock(t *testing.T) {
 
 func TestCmdBlockFilter_BlockEmittedAsOneChunk(t *testing.T) {
 	var got []string
-	f := &cmdBlockFilter{delegate: func(s string) { got = append(got, s) }}
-	f.Write("<cmd>\n§ ls\n</cmd>")
+	f := &cmdBlockBuffer{delegate: func(s string) { got = append(got, s) }}
+	f.Write("<cmd>\nls\n</cmd>")
 	f.Flush()
 	// Exactly one delegate call with the complete block content
 	require.Len(t, got, 1)
-	assert.Equal(t, "<cmd>\n§ ls\n</cmd>", got[0])
+	assert.Equal(t, "<cmd>\nls\n</cmd>", got[0])
 }
 
 func TestCmdBlockFilter_ClosingTagSplitAcrossDeltas(t *testing.T) {
 	var got []string
-	f := &cmdBlockFilter{delegate: func(s string) { got = append(got, s) }}
-	f.Write("<cmd>\n§ ls\n</cm")
+	f := &cmdBlockBuffer{delegate: func(s string) { got = append(got, s) }}
+	f.Write("<cmd>\nls\n</cm")
 	f.Write("d>after")
 	f.Flush()
 	combined := strings.Join(got, "")
-	assert.Contains(t, combined, "<cmd>\n§ ls\n</cmd>")
+	assert.Contains(t, combined, "<cmd>\nls\n</cmd>")
 	assert.Contains(t, combined, "after")
 }
 
 func TestCmdBlockFilter_TwoConsecutiveBlocks(t *testing.T) {
 	var got []string
-	f := &cmdBlockFilter{delegate: func(s string) { got = append(got, s) }}
-	f.Write("<cmd>\n§ ls\n</cmd><cmd>\n§ pwd\n</cmd>")
+	f := &cmdBlockBuffer{delegate: func(s string) { got = append(got, s) }}
+	f.Write("<cmd>\nls\n</cmd><cmd>\npwd\n</cmd>")
 	f.Flush()
 	// Both blocks emitted as separate delegate calls
-	assert.Contains(t, got, "<cmd>\n§ ls\n</cmd>")
-	assert.Contains(t, got, "<cmd>\n§ pwd\n</cmd>")
+	assert.Contains(t, got, "<cmd>\nls\n</cmd>")
+	assert.Contains(t, got, "<cmd>\npwd\n</cmd>")
 }
 
 func TestCmdBlockFilter_BlockAtStreamStart(t *testing.T) {
 	var got []string
-	f := &cmdBlockFilter{delegate: func(s string) { got = append(got, s) }}
-	f.Write("<cmd>\n§ ls\n</cmd>after")
+	f := &cmdBlockBuffer{delegate: func(s string) { got = append(got, s) }}
+	f.Write("<cmd>\nls\n</cmd>after")
 	f.Flush()
 	// No empty-string delegate call before the block
 	for _, s := range got {
 		assert.NotEqual(t, "", s, "unexpected empty-string delegate call")
 	}
-	assert.Contains(t, got, "<cmd>\n§ ls\n</cmd>")
+	assert.Contains(t, got, "<cmd>\nls\n</cmd>")
 	assert.Contains(t, got, "after")
 }
 
 func TestCmdBlockFilter_CompleteBlockThenUnclosed(t *testing.T) {
 	var got []string
-	f := &cmdBlockFilter{delegate: func(s string) { got = append(got, s) }}
-	f.Write("<cmd>\n§ ls\n</cmd><cmd>\n§ pwd")
+	f := &cmdBlockBuffer{delegate: func(s string) { got = append(got, s) }}
+	f.Write("<cmd>\nls\n</cmd><cmd>\npwd")
 	f.Flush()
 	// First block emitted; second (unclosed) is discarded
-	assert.Contains(t, got, "<cmd>\n§ ls\n</cmd>")
+	assert.Contains(t, got, "<cmd>\nls\n</cmd>")
 	for _, s := range got {
-		assert.NotContains(t, s, "§ pwd", "unclosed block content should be discarded")
+		assert.NotContains(t, s, "pwd", "unclosed block content should be discarded")
 	}
 }
 
@@ -321,6 +337,54 @@ func TestStreamFilter_BracketToolCall(t *testing.T) {
 	}
 	if !f.toolCallDetected {
 		t.Error("toolCallDetected should be true")
+	}
+}
+
+func TestCmdBlockBuffer_NestedBlocks(t *testing.T) {
+	tests := []struct {
+		name       string
+		input      string
+		wantProse  []string
+		wantBlocks []string
+	}{
+		{
+			"nested heredoc",
+			"text <cmd>cat <<EOF\nhello <cmd>nested</cmd>\nEOF</cmd> more",
+			[]string{"text ", " more"},
+			[]string{"<cmd>cat <<EOF\nhello <cmd>nested</cmd>\nEOF</cmd>"},
+		},
+		{
+			"content after nested",
+			"pre <cmd>start <cmd>nested</cmd> middle</cmd> post",
+			[]string{"pre ", " post"},
+			[]string{"<cmd>start <cmd>nested</cmd> middle</cmd>"},
+		},
+		{
+			"echo nested",
+			"<cmd>echo hello <cmd>world</cmd></cmd>",
+			[]string{},
+			[]string{"<cmd>echo hello <cmd>world</cmd></cmd>"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got []string
+			f := &cmdBlockBuffer{delegate: func(s string) { got = append(got, s) }}
+			f.Write(tt.input)
+			f.Flush()
+
+			prose, blocks := []string{}, []string{}
+			for _, s := range got {
+				if strings.HasPrefix(s, "<cmd>") {
+					blocks = append(blocks, s)
+				} else {
+					prose = append(prose, s)
+				}
+			}
+
+			assert.Equal(t, tt.wantProse, prose, "prose mismatch")
+			assert.Equal(t, tt.wantBlocks, blocks, "blocks mismatch")
+		})
 	}
 }
 
