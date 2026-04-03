@@ -233,79 +233,10 @@ func newAssistantStep(content, reasoning, reasoningSig string) StepMessage {
 // - depth 1→0 = real close tag
 // - depth >1 = nested tag, treated as content
 // Returns commands with leading/trailing whitespace trimmed.
-// Text outside <cmd> blocks is ignored.
+// scanCommands extracts commands from text. Kept for backward compatibility.
+// Use ParseMessage for new code — it returns both commands and prose.
 func scanCommands(text string) []string {
-	var cmds []string
-	depth := 0
-	var buf strings.Builder
-
-	for i := 0; i < len(text); {
-		if depth == 0 {
-			idx := strings.Index(text[i:], CmdBlockOpen)
-			if idx == -1 {
-				break
-			}
-			i += idx + len(CmdBlockOpen)
-			depth = 1
-			buf.Reset()
-			continue
-		}
-
-		if depth >= 1 {
-			// Look for </cmd>
-			closeIdx := strings.Index(text[i:], CmdBlockClose)
-			if closeIdx == -1 {
-				break
-			}
-
-			// Check for <cmd> before this </cmd>
-			nestedIdx := strings.Index(text[i:], CmdBlockOpen)
-
-			if nestedIdx != -1 && nestedIdx < closeIdx {
-				// Nested <cmd> found first — copy content before it AND the nested block
-				nestedCloseIdx := strings.Index(text[i+nestedIdx:], CmdBlockClose)
-				if nestedCloseIdx == -1 {
-					// Malformed: nested <cmd> with no close, treat rest as content
-					buf.WriteString(text[i:])
-					break
-				}
-				// Copy: content before nested <cmd> + nested <cmd>...</cmd>
-				buf.WriteString(text[i : i+nestedIdx+nestedCloseIdx+len(CmdBlockClose)])
-				i += nestedIdx + nestedCloseIdx + len(CmdBlockClose)
-				// Heredoc case: nested </cmd> was the last tag (i >= len).
-				// Strip the nested </cmd> and emit.
-				if i >= len(text) {
-					emitLen := buf.Len() - len(CmdBlockClose)
-					cmd := strings.TrimSpace(buf.String()[:emitLen])
-					if cmd != "" {
-						cmds = append(cmds, cmd)
-					}
-					depth = 0
-					continue
-				}
-				// Otherwise: content or outer </cmd> follows. Continue scanning.
-				// The outer </cmd> will be found in a subsequent iteration at depth 1.
-				continue
-			}
-
-			// Real close tag — emit command
-			if depth == 1 {
-				buf.WriteString(text[i : i+closeIdx])
-				cmd := strings.TrimSpace(buf.String())
-				if cmd != "" {
-					cmds = append(cmds, cmd)
-				}
-				i += closeIdx + len(CmdBlockClose)
-				depth = 0
-				continue
-			}
-
-			// depth >= 2: nested </cmd> — decrement depth and skip past it
-			i += closeIdx + len(CmdBlockClose)
-			depth--
-			continue
-		}
-	}
+	cmds, _ := ParseMessage(text)
 	return cmds
 }
 

@@ -47,34 +47,56 @@ func TestScanCommands(t *testing.T) {
 
 func TestParseMessage(t *testing.T) {
 	tests := []struct {
-		name              string
-		text              string
-		wantCmds          []string
-		wantProseContains string
+		name      string
+		text      string
+		wantCmds  []string
+		wantProse string
 	}{
+		// Basic cases
 		{"no blocks", "Hello world", nil, "Hello world"},
-		{"one block", "Before <cmd>ls</cmd> after", []string{"ls"}, "Before "},
+		{"one block", "Before <cmd>ls</cmd> after", []string{"ls"}, "Before  after"},
 		{"block at start", "<cmd>ls</cmd> after", []string{"ls"}, " after"},
 		{"block at end", "before <cmd>ls</cmd>", []string{"ls"}, "before "},
+		{"only block", "<cmd>ls</cmd>", []string{"ls"}, ""},
+		{"just text", "Just prose.", nil, "Just prose."},
+
+		// Multiple blocks
 		{"multiple blocks", "a <cmd>x</cmd> b <cmd>y</cmd> c", []string{"x", "y"}, "a  b  c"},
+		{"consecutive blocks", "<cmd>a</cmd><cmd>b</cmd>", []string{"a", "b"}, ""},
+		{"text between blocks", "pre <cmd>cmd1</cmd> mid <cmd>cmd2</cmd> post", []string{"cmd1", "cmd2"}, "pre  mid  post"},
+
+		// Nested cases
 		{"nested heredoc", "text <cmd>cat <<EOF\nhello <cmd> world\nEOF</cmd> more", []string{"cat <<EOF\nhello <cmd> world\nEOF"}, "text  more"},
 		{"content after nested", "<cmd>start <cmd>nested</cmd> middle</cmd> end", []string{"start <cmd>nested</cmd> middle"}, " end"},
 		{"deeply nested", "<cmd>a <cmd>b <cmd>c</cmd> d</cmd> e", []string{"a <cmd>b <cmd>c</cmd> d"}, " e"},
 		{"empty nested", "<cmd><cmd></cmd></cmd>", []string{"<cmd></cmd>"}, ""},
+		{"echo nested", "<cmd>echo hello <cmd> world</cmd>", []string{"echo hello <cmd> world"}, ""},
+		{"empty nested with space", "<cmd>\n<cmd></cmd>\n</cmd>", []string{"<cmd></cmd>"}, ""},
+
+		// Edge cases
+		{"bare § outside block", "§ ls -la", nil, "§ ls -la"},
+		{"unclosed block", "<cmd>unclosed", nil, ""}, // unclosed blocks are discarded
+		{"empty block", "<cmd></cmd>", nil, ""},
+		{"only whitespace", "   ", nil, "   "},
+
+		// Unicode and special chars
+		{"unicode prose", "Hello 世界 <cmd>ls</cmd> 你好", []string{"ls"}, "Hello 世界  你好"},
+		{"special chars in cmd", "<cmd>echo 'hello world' | grep -E 'test\\d+'</cmd>", []string{"echo 'hello world' | grep -E 'test\\d+'"}, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cmds, prose := ParseMessage(tt.text)
 			if len(cmds) != len(tt.wantCmds) {
 				t.Errorf("commands: got %d, want %d: %v", len(cmds), len(tt.wantCmds), cmds)
+				return
 			}
 			for i := range cmds {
 				if cmds[i] != tt.wantCmds[i] {
 					t.Errorf("command[%d] = %q, want %q", i, cmds[i], tt.wantCmds[i])
 				}
 			}
-			if !strings.Contains(prose, tt.wantProseContains) {
-				t.Errorf("prose = %q, want to contain %q", prose, tt.wantProseContains)
+			if prose != tt.wantProse {
+				t.Errorf("prose = %q, want %q", prose, tt.wantProse)
 			}
 		})
 	}
