@@ -35,18 +35,16 @@ const MaxHallucinationRetries = 3
 type (
 	// AllowedPath specifies a filesystem path allowed in the sandbox.
 	AllowedPath = client.AllowedPath
-	// RunBlockRequest is the request payload for batch block execution.
-	RunBlockRequest = client.RunBlockRequest
-	// RunBlockResponse is the response from batch block execution.
-	RunBlockResponse = client.RunBlockResponse
-	// CommandResult is one command's execution result within a block.
-	CommandResult = client.CommandResult
+	// RunRequest is the request payload for single command execution.
+	RunRequest = client.RunRequest
+	// RunResponse is the response from single command execution.
+	RunResponse = client.RunResponse
 )
 
-// BlockRunner executes a block of commands in the sandbox.
+// CommandRunner executes a single command in the sandbox.
 // *client.Client satisfies this interface automatically.
-type BlockRunner interface {
-	RunBlock(ctx context.Context, req RunBlockRequest) (*RunBlockResponse, error)
+type CommandRunner interface {
+	Run(ctx context.Context, req RunRequest) (*RunResponse, error)
 }
 
 // Config holds everything needed to run one agent loop iteration.
@@ -56,14 +54,11 @@ type Config struct {
 	SystemPrompt string
 	MaxSteps     int // 0 means use default (DefaultMaxSteps)
 	MaxTokens    int // 0 means use default (DefaultMaxTokens)
-	Temenos      BlockRunner
+	Temenos      CommandRunner
 	SandboxEnv   map[string]string // env vars passed to temenos per-request
 	// AllowedPaths lists filesystem paths accessible during command execution.
 	// Path validation (non-empty, absolute) is enforced by the temenos daemon.
 	AllowedPaths []AllowedPath
-	// Prefix is the command prefix the LLM uses (e.g. "§ ").
-	// Passed to RunBlock so temenos can parse commands. Defaults to "§ ".
-	Prefix string
 }
 
 // StepMessage represents one message generated during the agent loop.
@@ -88,14 +83,13 @@ type Callbacks struct {
 	OnDelta func(text string)
 	// OnCommandResult is called after a command executes with the command string,
 	// raw combined stdout+stderr output (no exit code suffix), and the exit code.
-	// Fires once per CommandResult from the batch response.
 	OnCommandResult func(command string, output string, exitCode int)
 	// OnRetry is called when a tool call hallucination (XML or bracket) is detected
 	// and an "unprocessed" directive is injected. reason is "tool_call".
 	OnRetry func(reason string, step int)
 }
 
-// Run executes the agent loop: prompt → LLM → § commands → repeat.
+// Run executes the agent loop: prompt → LLM → <cmd> blocks → repeat.
 // Stateless — the caller handles conversation persistence.
 func Run(
 	ctx context.Context,
@@ -168,22 +162,22 @@ func Run(
 			continue
 		}
 
-		preText, blocks := scanBlocks(fullText)
+		cmds := scanCommands(fullText)
 
-		if len(blocks) == 0 {
+		if len(cmds) == 0 {
 			// Final answer — return
 			steps = append(steps, newAssistantStep(fullText, reasoning, reasoningSig))
 			responseText.WriteString(fullText)
 			return &RunResult{Response: responseText.String(), Steps: steps}, nil
 		}
 
-		// Has command blocks — execute via temenos RunBlock
+		// Has commands — execute each via temenos
 		steps = append(steps, newAssistantStep(fullText, reasoning, reasoningSig))
-		responseText.WriteString(preText)
+		responseText.WriteString(fullText)
 
-		cmdOutputs := executeBlocks(ctx, cfg, cbs, blocks)
+		cmdOutputs := executeCommands(ctx, cfg, cbs, cmds)
 		if len(cmdOutputs) == 0 {
-			// ctx was already cancelled before any block ran; next streamOneTurn will
+			// ctx was already cancelled before any command ran; next streamOneTurn will
 			// return the context error and propagate it cleanly.
 			continue
 		}
@@ -206,11 +200,12 @@ func hallucinationDirective(attempt int) string {
 	if attempt <= 1 {
 		return "(Unprocessed: your output contained a tool call format that is not supported. " +
 			"This environment has no tool/function calling API. " +
-			"To run a command, wrap it in a <cmd> block — e.g.:\n<cmd>\n§ ls -la\n</cmd>)"
+			"To run a command, use a <cmd> block — e.g.:\n<cmd>\nls -la\n</cmd>)"
 	}
 	return fmt.Sprintf("(Unprocessed: tool call format detected again (attempt %d). "+
 		"There is NO tool calling API. The ONLY way to run commands is inside a <cmd> block. "+
-		"Do NOT use XML tags, brackets, or structured format. Example:\n<cmd>\n§ ls -la\n§ cat file.go\n</cmd>)", attempt)
+		"Do NOT use XML tags, brackets, or structured format. Example:\n"+
+		"<cmd>\nls -la\n</cmd>\n<cmd>\ncat file.go\n</cmd>)", attempt)
 }
 
 // newAssistantStep builds a StepMessage for an assistant turn, including optional
@@ -226,106 +221,111 @@ func newAssistantStep(content, reasoning, reasoningSig string) StepMessage {
 	}
 }
 
-// executeBlocks sends each block to temenos via RunBlock and formats results.
-// Fires OnCommandResult callback per command result from the batch.
-//
-// Design note: transport errors (RunBlock call fails entirely) are NOT surfaced
-// via OnCommandResult. In the batch model, a transport error means we got zero
-// results — there's no meaningful command/exitCode to report. The error appears
-// in the output text sent back to the LLM so it can retry.
-func executeBlocks(ctx context.Context, cfg Config, cbs Callbacks, blocks []string) []string {
-	prefix := cfg.Prefix
-	if prefix == "" {
-		prefix = "§ " // default for backward compat
-	}
+// scanCommands extracts individual raw commands from <cmd>...</cmd> blocks in text.
+// Uses depth-counting to handle nested <cmd> in command content correctly:
+// - depth 0→1 = real open tag
+// - depth 1→0 = real close tag
+// - depth >1 = nested tag, treated as content
+// Returns commands with leading/trailing whitespace trimmed.
+// Text outside <cmd> blocks is ignored.
+func scanCommands(text string) []string {
+	var cmds []string
+	depth := 0
+	var buf strings.Builder
+	openTag := "<cmd>"
+	closeTag := "</cmd>"
 
+	for i := 0; i < len(text); {
+		if depth == 0 {
+			// Look for next <cmd>
+			idx := strings.Index(text[i:], openTag)
+			if idx == -1 {
+				break
+			}
+			i += idx + len(openTag)
+			depth = 1
+			buf.Reset()
+			continue
+		}
+
+		if depth == 1 {
+			// Look for </cmd> or nested <cmd>
+			// Check nested first (inner <cmd> would be content, not a real open)
+			nestedIdx := strings.Index(text[i:], openTag)
+			closeIdx := strings.Index(text[i:], closeTag)
+
+			if closeIdx == -1 {
+				// No close tag — discard unclosed block
+				break
+			}
+			if nestedIdx != -1 && nestedIdx < closeIdx {
+				// Nested <cmd> found first — it's content
+				buf.WriteByte(text[i])
+				i++
+				continue
+			}
+
+			// Real close tag — copy all content before it into buffer
+			buf.WriteString(text[i : i+closeIdx])
+			cmd := strings.TrimSpace(buf.String())
+			if cmd != "" {
+				cmds = append(cmds, cmd)
+			}
+			i += closeIdx + len(closeTag)
+			depth = 0
+			continue
+		}
+	}
+	return cmds
+}
+
+// executeCommands sends each command to temenos individually and formats results.
+// Fires OnCommandResult callback per command result.
+//
+// Transport errors are NOT surfaced via OnCommandResult — the error appears
+// in the output text sent back to the LLM so it can retry.
+func executeCommands(ctx context.Context, cfg Config, cbs Callbacks, cmds []string) []string {
 	var outputParts []string
-	for _, block := range blocks {
+	for _, cmd := range cmds {
 		if ctx.Err() != nil {
 			break
 		}
 
-		resp, err := cfg.Temenos.RunBlock(ctx, RunBlockRequest{
-			Block:        block,
-			Prefix:       prefix,
+		resp, err := cfg.Temenos.Run(ctx, RunRequest{
+			Command:      cmd,
 			Env:          cfg.SandboxEnv,
 			AllowedPaths: cfg.AllowedPaths,
 		})
 		if err != nil {
-			slog.Error("temenos RunBlock failure", "error", err)
+			slog.Error("temenos Run failure", "error", err)
 			outputParts = append(outputParts, fmt.Sprintf("execution error: %v", err))
 			continue
 		}
 
-		if len(resp.Results) == 0 {
-			slog.Warn("logos: RunBlock returned no results; possible prefix mismatch", "prefix", prefix)
-			outputParts = append(outputParts, fmt.Sprintf("(block produced no results with prefix %q)", prefix))
-			continue
+		output := resp.Stdout
+		if resp.Stderr != "" {
+			output += "\nSTDERR:\n" + resp.Stderr
+		}
+		if output == "" {
+			output = "(no output)"
+		}
+		if cbs.OnCommandResult != nil {
+			cbs.OnCommandResult(cmd, output, resp.ExitCode)
 		}
 
-		for _, r := range resp.Results {
-			output := r.Stdout
-			if r.Stderr != "" {
-				output += "\nSTDERR:\n" + r.Stderr
-			}
-			if output == "" {
-				output = "(no output)"
-			}
-			if cbs.OnCommandResult != nil {
-				cbs.OnCommandResult(r.Command, output, r.ExitCode)
-			}
-
-			formatted := prefix + r.Command + "\n" + output
-			if r.ExitCode != 0 && r.ExitCode != -1 {
-				formatted += fmt.Sprintf("\n(exit code: %d)", r.ExitCode)
-			}
-			outputParts = append(outputParts, formatted)
+		formatted := cmd + "\n" + output
+		if resp.ExitCode != 0 && resp.ExitCode != -1 {
+			formatted += fmt.Sprintf("\n(exit code: %d)", resp.ExitCode)
 		}
+		outputParts = append(outputParts, formatted)
 	}
 	return outputParts
 }
 
-// scanBlocks extracts raw content from <cmd>...</cmd> blocks in text.
-// Returns the text before the first block and a slice of raw block contents.
-// Bare text outside blocks is treated as prose.
-func scanBlocks(text string) (preText string, blocks []string) {
-	firstBlockIdx := strings.Index(text, "<cmd>")
-	if firstBlockIdx == -1 {
-		return text, nil
-	}
-	preText = text[:firstBlockIdx]
-	remaining := text[firstBlockIdx:] // start from first block, avoiding a redundant search
-
-	for {
-		openIdx := strings.Index(remaining, "<cmd>")
-		if openIdx == -1 {
-			break
-		}
-		closeIdx := strings.Index(remaining[openIdx:], "</cmd>")
-		var blockContent string
-		if closeIdx == -1 {
-			blockContent = remaining[openIdx+len("<cmd>"):]
-			remaining = ""
-			slog.Warn("logos: unclosed <cmd> block, sending partial block to temenos")
-		} else {
-			blockContent = remaining[openIdx+len("<cmd>") : openIdx+closeIdx]
-			remaining = remaining[openIdx+closeIdx+len("</cmd>"):]
-		}
-
-		if blockContent != "" {
-			blocks = append(blocks, blockContent)
-		}
-
-		if remaining == "" {
-			break
-		}
-	}
-	return preText, blocks
-}
-
 // streamFilter sits between the LLM stream and OnDelta, filtering XML tool_call
 // markers (suppress + retry), bracket tool_call markers (suppress + retry), and
-// strip markers like </think> (tag-only removal — inter-tag content is passed through unchanged).
+// strip markers like &#x3c;result&#x3e; (tag-only removal — inter-tag content (tag-only removal — inter-tag content
+// passes through unchanged).
 type streamFilter struct {
 	delegate         func(string)
 	buf              strings.Builder
@@ -360,22 +360,6 @@ func (f *streamFilter) Write(delta string) {
 	f.checkBuffer()
 }
 
-// firstNonNeg returns the smaller of two non-negative integers, or the other
-// if one is negative. Returns -1 if both are negative.
-func firstNonNeg(a, b int) int {
-	switch {
-	case a < 0:
-		return b
-	case b < 0:
-		return a
-	default:
-		if a < b {
-			return a
-		}
-		return b
-	}
-}
-
 // checkBuffer inspects the current buffer for known markers and acts accordingly.
 func (f *streamFilter) checkBuffer() {
 	bufStr := f.buf.String()
@@ -398,9 +382,7 @@ func (f *streamFilter) checkBuffer() {
 		return
 	}
 
-	// Tier 2: Strip markers — remove tag strings, flush surrounding text.
-	// Note: only the marker strings themselves are removed; content between
-	// opening and closing tags (e.g. between <think> and </think>) passes through.
+	// Tier 2: stripMarkers — silently remove without triggering retry.
 	cleaned := bufStr
 	stripped := false
 	for _, marker := range stripMarkers {
@@ -540,6 +522,20 @@ func hasPrefixInSlice(s string, markers []string) bool {
 		}
 	}
 	return false
+}
+
+// firstNonNeg returns the first non-negative of a and b, or -1 if both are negative.
+func firstNonNeg(a, b int) int {
+	if a == -1 {
+		return b
+	}
+	if b == -1 {
+		return a
+	}
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // streamOneTurn streams a single LLM response (no tools).
