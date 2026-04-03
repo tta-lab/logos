@@ -31,6 +31,12 @@ const DefaultMaxTokens = 16384
 // before Run() returns an error.
 const MaxHallucinationRetries = 3
 
+// CmdBlockOpen is the opening tag for command blocks: <cmd>...</cmd>.
+const CmdBlockOpen = "<cmd>"
+
+// CmdBlockClose is the closing tag for command blocks: <cmd>...</cmd>.
+const CmdBlockClose = "</cmd>"
+
 // Re-exported from temenos/client so consumers don't import temenos directly.
 type (
 	// AllowedPath specifies a filesystem path allowed in the sandbox.
@@ -232,16 +238,14 @@ func scanCommands(text string) []string {
 	var cmds []string
 	depth := 0
 	var buf strings.Builder
-	openTag := "<cmd>"
-	closeTag := "</cmd>"
 
 	for i := 0; i < len(text); {
 		if depth == 0 {
-			idx := strings.Index(text[i:], openTag)
+			idx := strings.Index(text[i:], CmdBlockOpen)
 			if idx == -1 {
 				break
 			}
-			i += idx + len(openTag)
+			i += idx + len(CmdBlockOpen)
 			depth = 1
 			buf.Reset()
 			continue
@@ -249,39 +253,39 @@ func scanCommands(text string) []string {
 
 		if depth >= 1 {
 			// Look for </cmd>
-			closeIdx := strings.Index(text[i:], closeTag)
+			closeIdx := strings.Index(text[i:], CmdBlockClose)
 			if closeIdx == -1 {
 				break
 			}
 
 			// Check for <cmd> before this </cmd>
-			nestedIdx := strings.Index(text[i:], openTag)
+			nestedIdx := strings.Index(text[i:], CmdBlockOpen)
 
 			if nestedIdx != -1 && nestedIdx < closeIdx {
 				// Nested <cmd> found first — copy content before it AND the nested block
-				nestedCloseIdx := strings.Index(text[i+nestedIdx:], closeTag)
+				nestedCloseIdx := strings.Index(text[i+nestedIdx:], CmdBlockClose)
 				if nestedCloseIdx == -1 {
 					// Malformed: nested <cmd> with no close, treat rest as content
 					buf.WriteString(text[i:])
 					break
 				}
 				// Copy: content before nested <cmd> + nested <cmd>...</cmd>
-				buf.WriteString(text[i : i+nestedIdx+nestedCloseIdx+len(closeTag)])
-				i += nestedIdx + nestedCloseIdx + len(closeTag)
+				buf.WriteString(text[i : i+nestedIdx+nestedCloseIdx+len(CmdBlockClose)])
+				i += nestedIdx + nestedCloseIdx + len(CmdBlockClose)
 				// After consuming the nested block, check if the nested </cmd> is also the
 				// outer </cmd> (no content between them).
 				// i >= len(text): consumed to end of string (nested </cmd> was the last tag).
-				// text[i:] == closeTag: remaining text IS just the outer </cmd>.
-				atOuterClose := i >= len(text) || text[i:] == closeTag
+				// text[i:] == CmdBlockClose: remaining text IS just the outer </cmd>.
+				atOuterClose := i >= len(text) || text[i:] == CmdBlockClose
 				if atOuterClose {
 					// Emit content, stripping the nested </cmd> that we included in the buffer.
-					emitLen := buf.Len() - len(closeTag)
+					emitLen := buf.Len() - len(CmdBlockClose)
 					cmd := strings.TrimSpace(buf.String()[:emitLen])
 					if cmd != "" {
 						cmds = append(cmds, cmd)
 					}
 					if i < len(text) {
-						i += len(closeTag)
+						i += len(CmdBlockClose)
 					}
 					depth = 0
 					continue
@@ -296,13 +300,13 @@ func scanCommands(text string) []string {
 				if cmd != "" {
 					cmds = append(cmds, cmd)
 				}
-				i += closeIdx + len(closeTag)
+				i += closeIdx + len(CmdBlockClose)
 				depth = 0
 				continue
 			}
 
 			// depth >= 2: nested </cmd> — decrement depth and skip past it
-			i += closeIdx + len(closeTag)
+			i += closeIdx + len(CmdBlockClose)
 			depth--
 			continue
 		}
@@ -475,7 +479,7 @@ func (f *cmdBlockFilter) Write(delta string) {
 	for len(delta) > 0 {
 		if f.inBlock {
 			// Inside <cmd> block — look for </cmd>
-			idx := strings.Index(delta, "</cmd>")
+			idx := strings.Index(delta, CmdBlockClose)
 			if idx == -1 {
 				// No closing tag yet — buffer all content; the buf prepend at the top
 				// of Write will concatenate it with the next delta so </cmd> can be found.
@@ -483,17 +487,17 @@ func (f *cmdBlockFilter) Write(delta string) {
 				return
 			}
 			// Found closing tag — emit complete block as one chunk, continue with remainder as prose
-			f.delegate("<cmd>" + delta[:idx] + "</cmd>")
+			f.delegate(CmdBlockOpen + delta[:idx] + CmdBlockClose)
 			f.inBlock = false
-			delta = delta[idx+len("</cmd>"):]
+			delta = delta[idx+len(CmdBlockClose):]
 			continue
 		}
 		// Outside block — look for <cmd>
-		idx := strings.Index(delta, "<cmd>")
+		idx := strings.Index(delta, CmdBlockOpen)
 		if idx == -1 {
 			// Check for partial <cmd> prefix at end of delta
-			for plen := min(len("<cmd>")-1, len(delta)); plen > 0; plen-- {
-				if strings.HasSuffix(delta, "<cmd>"[:plen]) {
+			for plen := min(len(CmdBlockOpen)-1, len(delta)); plen > 0; plen-- {
+				if strings.HasSuffix(delta, CmdBlockOpen[:plen]) {
 					f.delegate(delta[:len(delta)-plen])
 					f.buf.WriteString(delta[len(delta)-plen:])
 					return
@@ -507,7 +511,7 @@ func (f *cmdBlockFilter) Write(delta string) {
 			f.delegate(delta[:idx])
 		}
 		f.inBlock = true
-		delta = delta[idx+len("<cmd>"):]
+		delta = delta[idx+len(CmdBlockOpen):]
 	}
 }
 
