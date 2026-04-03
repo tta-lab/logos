@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"charm.land/fantasy"
@@ -144,8 +145,8 @@ func Run(
 				cbs.OnDelta(text)
 			}
 		}
-		fullText, reasoning, reasoningSig, toolCallDetected, streamErr :=
-			streamOneTurn(ctx, model, messages, maxTokens, onDelta)
+		fullText, reasoning, reasoningSig, toolCallDetected, cmdResults, streamErr :=
+			streamOneTurn(ctx, model, messages, maxTokens, cfg, cbs, onDelta)
 		if streamErr != nil {
 			return nil, fmt.Errorf("stream turn %d: %w", step, streamErr)
 		}
@@ -169,26 +170,15 @@ func Run(
 			continue
 		}
 
-		cmds := scanCommands(fullText)
-
-		if len(cmds) == 0 {
-			// Final answer — return
-			steps = append(steps, newAssistantStep(fullText, reasoning, reasoningSig))
-			responseText.WriteString(fullText)
-			return &RunResult{Response: responseText.String(), Steps: steps}, nil
-		}
-
-		// Has commands — execute each via temenos
 		steps = append(steps, newAssistantStep(fullText, reasoning, reasoningSig))
 		responseText.WriteString(fullText)
 
-		cmdOutputs := executeCommands(ctx, cfg, cbs, cmds)
-		if len(cmdOutputs) == 0 {
-			// ctx was already cancelled before any command ran; next streamOneTurn will
-			// return the context error and propagate it cleanly.
-			continue
+		if len(cmdResults) == 0 {
+			// Final answer — return
+			return &RunResult{Response: responseText.String(), Steps: steps}, nil
 		}
-		userContent := "<result>\n" + strings.Join(cmdOutputs, "\n") + "\n</result>"
+
+		userContent := "<result>\n" + strings.Join(cmdResults, "\n") + "\n</result>"
 
 		steps = append(steps, StepMessage{Role: StepRoleResult, Content: userContent, Timestamp: time.Now().UTC()})
 		aMsg2 := newAssistantMessage(fullText, reasoning, reasoningSig)
@@ -228,129 +218,6 @@ func newAssistantStep(content, reasoning, reasoningSig string) StepMessage {
 	}
 }
 
-// scanCommands extracts individual raw commands from <cmd>...</cmd> blocks in text.
-// Uses depth-counting to handle nested <cmd> in command content correctly:
-// - depth 0→1 = real open tag
-// - depth 1→0 = real close tag
-// - depth >1 = nested tag, treated as content
-// Returns commands with leading/trailing whitespace trimmed.
-// scanCommands extracts commands from text. Kept for backward compatibility.
-// Use ParseMessage for new code — it returns both commands and prose.
-func scanCommands(text string) []string {
-	cmds, _ := ParseMessage(text)
-	return cmds
-}
-
-// ParseMessage parses a raw message that may contain <cmd>...</cmd> blocks.
-// Returns:
-//   - commands: extracted command contents (for execution)
-//   - prose: message with all <cmd> blocks stripped (for display to human)
-//
-// Nested <cmd> inside blocks are treated as content and preserved.
-func ParseMessage(text string) (commands []string, prose string) {
-	var cmdBuf strings.Builder
-	var proseBuf strings.Builder
-	depth := 0
-
-	for i := 0; i < len(text); {
-		if depth == 0 {
-			// Look for next <cmd>
-			idx := strings.Index(text[i:], CmdBlockOpen)
-			if idx == -1 {
-				proseBuf.WriteString(text[i:])
-				break
-			}
-			proseBuf.WriteString(text[i : i+idx])
-			i += idx + len(CmdBlockOpen)
-			depth = 1
-			cmdBuf.Reset()
-			continue
-		}
-
-		// At depth >= 1: look for </cmd>
-		closeIdx := strings.Index(text[i:], CmdBlockClose)
-		if closeIdx == -1 {
-			break
-		}
-
-		// Check for nested <cmd> before this </cmd>
-		nestedIdx := strings.Index(text[i:], CmdBlockOpen)
-
-		if nestedIdx != -1 && nestedIdx < closeIdx {
-			// Nested <cmd> found first — it's content
-			nestedCloseIdx := strings.Index(text[i+nestedIdx:], CmdBlockClose)
-			if nestedCloseIdx == -1 {
-				cmdBuf.WriteString(text[i:])
-				break
-			}
-			// Copy content before nested <cmd> + the nested block
-			cmdBuf.WriteString(text[i : i+nestedIdx+nestedCloseIdx+len(CmdBlockClose)])
-			i += nestedIdx + nestedCloseIdx + len(CmdBlockClose)
-
-			// Heredoc case: nested </cmd> was the last </cmd> in the string
-			// Check if there are more </cmd> tags after current position
-			remainingAfterNested := text[i:]
-			nextCloseIdx := strings.Index(remainingAfterNested, CmdBlockClose)
-			if nextCloseIdx == -1 {
-				// No more </cmd> — this nested close is the outer close
-				emitLen := cmdBuf.Len() - len(CmdBlockClose)
-				cmd := strings.TrimSpace(cmdBuf.String()[:emitLen])
-				if cmd != "" {
-					commands = append(commands, cmd)
-				}
-				proseBuf.WriteString(remainingAfterNested)
-				return commands, proseBuf.String()
-			}
-			// More </cmd> ahead — outer close is different, continue scanning
-			continue
-		}
-
-		// Found </cmd> before any nested <cmd>
-		if depth == 1 {
-			cmdBuf.WriteString(text[i : i+closeIdx])
-			cmd := strings.TrimSpace(cmdBuf.String())
-			if cmd != "" {
-				commands = append(commands, cmd)
-			}
-			i += closeIdx + len(CmdBlockClose)
-			depth = 0
-			continue
-		}
-
-		// depth >= 2: nested </cmd> — skip it
-		i += closeIdx + len(CmdBlockClose)
-		depth--
-		continue
-	}
-
-	return commands, proseBuf.String()
-}
-
-// executeCommands runs commands in parallel and returns results in command order.
-// Fires OnCommandResult callback per command result.
-func executeCommands(ctx context.Context, cfg Config, cbs Callbacks, cmds []string) []string {
-	if len(cmds) == 0 {
-		return nil
-	}
-
-	// Use parallel execution with workers up to command count
-	workers := len(cmds)
-	if workers > 8 {
-		workers = 8 // cap at 8 workers
-	}
-
-	exec := newCmdExecutor(ctx, cfg, cbs, workers)
-
-	// Submit all commands with their indices
-	for i, cmd := range cmds {
-		exec.submit(i, cmd)
-	}
-
-	// Wait for completion and collect results
-	exec.Done()
-	return exec.collectResults(len(cmds))
-}
-
 // cmdResult holds a command execution result with its index for ordering.
 type cmdResult struct {
 	index  int
@@ -359,12 +226,12 @@ type cmdResult struct {
 
 // cmdExecutor runs commands in parallel via goroutines.
 type cmdExecutor struct {
-	ctx     context.Context
-	cfg     Config
-	cbs     Callbacks
-	cmdCh   chan cmdTask
-	results chan cmdResult
-	wg      sync.WaitGroup
+	ctx       context.Context
+	cfg       Config
+	cbs       Callbacks
+	cmdCh     chan cmdTask
+	resultsCh chan cmdResult
+	wg        sync.WaitGroup
 }
 
 // cmdTask is a command with its index for ordering.
@@ -374,15 +241,15 @@ type cmdTask struct {
 }
 
 // newCmdExecutor creates a command executor with the given number of workers.
-func newCmdExecutor(ctx context.Context, cfg Config, cbs Callbacks, workers int) *cmdExecutor {
+func newCmdExecutor(ctx context.Context, cfg Config, cbs Callbacks, n int, resultsCh chan cmdResult) *cmdExecutor {
 	e := &cmdExecutor{
-		ctx:     ctx,
-		cfg:     cfg,
-		cbs:     cbs,
-		cmdCh:   make(chan cmdTask, workers),
-		results: make(chan cmdResult, workers),
+		ctx:       ctx,
+		cfg:       cfg,
+		cbs:       cbs,
+		cmdCh:     make(chan cmdTask, n),
+		resultsCh: resultsCh,
 	}
-	for i := 0; i < workers; i++ {
+	for i := 0; i < n; i++ {
 		e.wg.Add(1)
 		go e.worker()
 	}
@@ -401,7 +268,7 @@ func (e *cmdExecutor) submit(index int, cmd string) {
 func (e *cmdExecutor) Done() {
 	close(e.cmdCh)
 	e.wg.Wait()
-	close(e.results)
+	close(e.resultsCh)
 }
 
 // worker runs a command execution goroutine.
@@ -421,7 +288,7 @@ func (e *cmdExecutor) worker() {
 		})
 		if err != nil {
 			slog.Error("temenos Run failure", "error", err)
-			e.results <- cmdResult{index: task.index, output: fmt.Sprintf("execution error: %v", err)}
+			e.resultsCh <- cmdResult{index: task.index, output: fmt.Sprintf("execution error: %v", err)}
 			continue
 		}
 
@@ -440,15 +307,15 @@ func (e *cmdExecutor) worker() {
 		if resp.ExitCode != 0 && resp.ExitCode != -1 {
 			formatted += fmt.Sprintf("\n(exit code: %d)", resp.ExitCode)
 		}
-		e.results <- cmdResult{index: task.index, output: formatted}
+		e.resultsCh <- cmdResult{index: task.index, output: formatted}
 	}
 }
 
-// collectResults waits for all results and returns them in command order.
-func (e *cmdExecutor) collectResults(count int) []string {
+// collectOrderedResults waits for count results and returns them in order.
+func collectOrderedResults(resultsCh <-chan cmdResult, count int) []string {
 	results := make([]string, count)
 	for i := 0; i < count; i++ {
-		result, ok := <-e.results
+		result, ok := <-resultsCh
 		if !ok {
 			break
 		}
@@ -536,12 +403,13 @@ func (f *proseFilter) Flush() {
 }
 
 // cmdBlockBuffer assembles <cmd>...</cmd> blocks from streaming deltas.
-// Emits atomic <cmd>...</cmd> chunks for commands, and prose text for display.
-// Consumers can discard chunks starting with "<cmd>" to get clean prose.
+// Routes clean prose to proseDelegate and complete blocks to exec.
+// Consumers can use exec=nil to get clean prose without execution.
 type cmdBlockBuffer struct {
-	delegate func(string)
-	buf      strings.Builder
-	depth    int // nested block depth (>0 means inside block)
+	proseDelegate func(string)       // For prose → hallucinationFilter → onDelta
+	exec          func(block string) // For complete blocks → executor
+	buf           strings.Builder
+	depth         int // nested block depth (>0 means inside block)
 }
 
 func (f *cmdBlockBuffer) Write(delta string) {
@@ -552,60 +420,77 @@ func (f *cmdBlockBuffer) Write(delta string) {
 
 	for len(delta) > 0 {
 		if f.depth > 0 {
-			// Inside block — look for nested <cmd> or </cmd>
-			// Find next <cmd> or </cmd>
-			nextOpen := strings.Index(delta, CmdBlockOpen)
-			nextClose := strings.Index(delta, CmdBlockClose)
-			if nextOpen == -1 && nextClose == -1 {
-				f.buf.WriteString(delta)
-				return
-			}
-			if nextOpen != -1 && (nextClose == -1 || nextOpen < nextClose) {
-				// Nested <cmd> found first — include the <cmd> tag in buffer
-				f.buf.WriteString(delta[:nextOpen+len(CmdBlockOpen)])
-				delta = delta[nextOpen+len(CmdBlockOpen):]
-				f.depth++ // Entering nested block
-				continue
-			}
-			// </cmd> found (either first or no nested <cmd>)
-			before := delta[:nextClose]
-			remain := delta[nextClose+len(CmdBlockClose):]
-			f.buf.WriteString(before)
-			f.depth-- // Closed a block
-			if f.depth == 0 {
-				// Outer block closed — emit complete block
-				f.delegate(CmdBlockOpen + f.buf.String() + CmdBlockClose)
-				f.buf.Reset()
-				delta = remain
-				continue
-			}
-			// Inner block closed, still in outer block
-			f.buf.WriteString(CmdBlockClose)
-			delta = remain
-			continue
+			delta = f.writeInsideBlock(delta)
+		} else {
+			delta = f.writeOutsideBlock(delta)
 		}
+	}
+}
 
-		// Outside block — find <cmd>
-		idx := strings.Index(delta, CmdBlockOpen)
-		if idx == -1 {
-			// Check for partial <cmd> prefix at end
-			for plen := min(len(CmdBlockOpen)-1, len(delta)); plen > 0; plen-- {
-				if strings.HasSuffix(delta, CmdBlockOpen[:plen]) {
-					f.delegate(delta[:len(delta)-plen])
-					f.buf.WriteString(delta[len(delta)-plen:])
-					return
-				}
-			}
-			f.delegate(delta)
-			return
-		}
+func (f *cmdBlockBuffer) writeInsideBlock(delta string) string {
+	nextOpen := strings.Index(delta, CmdBlockOpen)
+	nextClose := strings.Index(delta, CmdBlockClose)
+	if nextOpen == -1 && nextClose == -1 {
+		f.buf.WriteString(delta)
+		return ""
+	}
+	if nextOpen != -1 && (nextClose == -1 || nextOpen < nextClose) {
+		f.buf.WriteString(delta[:nextOpen+len(CmdBlockOpen)])
+		delta = delta[nextOpen+len(CmdBlockOpen):]
+		f.depth++
+		return delta
+	}
+	before := delta[:nextClose]
+	remain := delta[nextClose+len(CmdBlockClose):]
+	f.buf.WriteString(before)
+	f.depth--
+	if f.depth == 0 {
+		block := CmdBlockOpen + f.buf.String() + CmdBlockClose
+		f.emitBlock(block)
+		f.buf.Reset()
+		return remain
+	}
+	f.buf.WriteString(CmdBlockClose)
+	return remain
+}
 
-		// Found <cmd> — pass through text before, then enter block
-		if idx > 0 {
-			f.delegate(delta[:idx])
+func (f *cmdBlockBuffer) writeOutsideBlock(delta string) string {
+	idx := strings.Index(delta, CmdBlockOpen)
+	if idx == -1 {
+		delta, _ = f.flushPartial(delta)
+		if delta != "" && f.proseDelegate != nil {
+			f.proseDelegate(delta)
 		}
-		f.depth = 1 // Entering outer block (depth 1 = inside block, 0 = outside)
-		delta = delta[idx+len(CmdBlockOpen):]
+		return ""
+	}
+	if idx > 0 && f.proseDelegate != nil {
+		f.proseDelegate(delta[:idx])
+	}
+	f.depth = 1
+	return delta[idx+len(CmdBlockOpen):]
+}
+
+func (f *cmdBlockBuffer) flushPartial(delta string) (string, bool) {
+	for plen := min(len(CmdBlockOpen)-1, len(delta)); plen > 0; plen-- {
+		if strings.HasSuffix(delta, CmdBlockOpen[:plen]) {
+			prose := delta[:len(delta)-plen]
+			partial := delta[len(delta)-plen:]
+			if f.proseDelegate != nil && prose != "" {
+				f.proseDelegate(prose)
+			}
+			f.buf.WriteString(partial)
+			return "", true
+		}
+	}
+	return delta, false
+}
+
+func (f *cmdBlockBuffer) emitBlock(block string) {
+	if f.exec != nil {
+		f.exec(block)
+	}
+	if f.proseDelegate != nil {
+		f.proseDelegate(block)
 	}
 }
 
@@ -614,7 +499,9 @@ func (f *cmdBlockBuffer) Flush() {
 		if f.depth > 0 {
 			slog.Warn("cmdBlockBuffer: stream ended with unclosed <cmd> block", "buffered_len", f.buf.Len())
 		} else {
-			f.delegate(f.buf.String())
+			if f.proseDelegate != nil {
+				f.proseDelegate(f.buf.String())
+			}
 		}
 		f.buf.Reset()
 		f.depth = 0
@@ -666,29 +553,47 @@ func firstNonNeg(a, b int) int {
 
 // streamOneTurn streams a single LLM response (no tools).
 // Returns the full unfiltered text, reasoning content, reasoning signature,
-// whether a tool call hallucination was detected, and any error.
+// whether a tool call hallucination was detected, command results, and any error.
 // Reasoning fields are empty for providers that don't emit thinking blocks.
-// filter.Flush() is deferred so buffered content is always emitted, even on error.
+// cmdBlockBuffer.Flush() is deferred so buffered content is always emitted, even on error.
 func streamOneTurn(
 	ctx context.Context,
 	model fantasy.LanguageModel,
 	messages []fantasy.Message,
 	maxTokens int64,
+	cfg Config,
+	cbs Callbacks,
 	onDelta func(string),
-) (text string, reasoning string, reasoningSig string, hallucinated bool, err error) {
+) (text string, reasoning string, reasoningSig string, hallucinated bool, cmdResults []string, err error) {
 	stream, streamErr := model.Stream(ctx, fantasy.Call{
 		Prompt:          fantasy.Prompt(messages),
 		MaxOutputTokens: &maxTokens,
 	})
 	if streamErr != nil {
-		return "", "", "", false, streamErr
+		return "", "", "", false, nil, streamErr
 	}
 
-	hallucinationFilter := &proseFilter{delegate: onDelta}
-	cmdFilter := &cmdBlockBuffer{delegate: hallucinationFilter.Write}
+	// Parallel execution: resultsCh collects cmd results in order.
+	// workers capped at 8; numCmds determined by atomic counter as cmds arrive.
+	numCmds := atomic.Int64{}
+	resultsCh := make(chan cmdResult, 10)
+	workers := 8
+
+	exec := newCmdExecutor(ctx, cfg, cbs, workers, resultsCh)
+
+	// Chain: hallucinationFilter → cmdBlockBuffer → onDelta
+	// - hallucinationFilter catches tool_call hallucination
+	// - cmdBlockBuffer routes prose to onDelta and complete blocks to exec
+	hallucinationFilter := &proseFilter{delegate: func(s string) { onDelta(s) }}
+	cmdFilter := &cmdBlockBuffer{
+		proseDelegate: hallucinationFilter.Write,
+		exec: func(block string) {
+			cmd := extractCmdFromBlock(block)
+			idx := int(numCmds.Add(1) - 1)
+			exec.submit(idx, cmd)
+		},
+	}
 	// Order matters: cmdFilter.Flush() must run BEFORE hallucinationFilter.Flush().
-	// cmdFilter.Flush() may emit buffered content to hallucinationFilter.Write,
-	// so hallucinationFilter must still be accepting input. If reversed, that content is lost.
 	defer func() { cmdFilter.Flush(); hallucinationFilter.Flush() }()
 
 	var fullText strings.Builder
@@ -713,11 +618,24 @@ func streamOneTurn(
 			}
 		case fantasy.StreamPartTypeError:
 			if part.Error != nil {
-				return fullText.String(), reasoningBuf.String(), reasoningSig, hallucinationFilter.toolCallDetected, part.Error
+				return fullText.String(), reasoningBuf.String(), reasoningSig, hallucinationFilter.toolCallDetected, nil, part.Error
 			}
 		}
 	}
-	return fullText.String(), reasoningBuf.String(), reasoningSig, hallucinationFilter.toolCallDetected, nil
+
+	exec.Done()
+	results := collectOrderedResults(resultsCh, int(numCmds.Load()))
+	return fullText.String(), reasoningBuf.String(), reasoningSig, hallucinationFilter.toolCallDetected, results, nil
+}
+
+// extractCmdFromBlock extracts the command content from a <cmd>...</cmd> block.
+func extractCmdFromBlock(block string) string {
+	return strings.TrimSpace(
+		strings.TrimSuffix(
+			strings.TrimPrefix(block, CmdBlockOpen),
+			CmdBlockClose,
+		),
+	)
 }
 
 // newAssistantMessage wraps text (and optional reasoning) as a fantasy assistant message.
