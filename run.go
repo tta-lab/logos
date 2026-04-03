@@ -272,24 +272,19 @@ func scanCommands(text string) []string {
 				// Copy: content before nested <cmd> + nested <cmd>...</cmd>
 				buf.WriteString(text[i : i+nestedIdx+nestedCloseIdx+len(CmdBlockClose)])
 				i += nestedIdx + nestedCloseIdx + len(CmdBlockClose)
-				// After consuming the nested block, check if the nested </cmd> is also the
-				// outer </cmd> (no content between them).
-				// i >= len(text): consumed to end of string (nested </cmd> was the last tag).
-				// text[i:] == CmdBlockClose: remaining text IS just the outer </cmd>.
-				atOuterClose := i >= len(text) || text[i:] == CmdBlockClose
-				if atOuterClose {
-					// Emit content, stripping the nested </cmd> that we included in the buffer.
+				// Heredoc case: nested </cmd> was the last tag (i >= len).
+				// Strip the nested </cmd> and emit.
+				if i >= len(text) {
 					emitLen := buf.Len() - len(CmdBlockClose)
 					cmd := strings.TrimSpace(buf.String()[:emitLen])
 					if cmd != "" {
 						cmds = append(cmds, cmd)
 					}
-					if i < len(text) {
-						i += len(CmdBlockClose)
-					}
 					depth = 0
 					continue
 				}
+				// Otherwise: content or outer </cmd> follows. Continue scanning.
+				// The outer </cmd> will be found in a subsequent iteration at depth 1.
 				continue
 			}
 
