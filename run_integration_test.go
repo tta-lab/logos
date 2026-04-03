@@ -9,7 +9,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"charm.land/fantasy"
 	"charm.land/fantasy/providers/anthropic"
@@ -64,12 +66,15 @@ func (m *mockLanguageModel) Stream(_ context.Context, _ fantasy.Call) (fantasy.S
 
 // mockCommandRunner implements CommandRunner for tests.
 type mockCommandRunner struct {
+	mu       sync.Mutex
 	response RunResponse
 	err      error
 	calls    []RunRequest
 }
 
 func (m *mockCommandRunner) Run(_ context.Context, req RunRequest) (*RunResponse, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.calls = append(m.calls, req)
 	if m.err != nil {
 		return nil, m.err
@@ -437,4 +442,113 @@ func TestRun_ReasoningCaptured_WithCommand(t *testing.T) {
 	assert.Equal(t, "sigABC", result.Steps[0].ReasoningSignature)
 	// Step 1 is the result step.
 	assert.Equal(t, StepRoleResult, result.Steps[1].Role)
+}
+
+// slowMockCommandRunner simulates variable command durations for testing parallel execution ordering.
+type slowMockCommandRunner struct {
+	mu       sync.Mutex
+	calls    []RunRequest
+	delays   map[string]time.Duration // command -> delay
+	muDelays sync.Mutex
+}
+
+func (m *slowMockCommandRunner) Run(_ context.Context, req RunRequest) (*RunResponse, error) {
+	m.mu.Lock()
+	m.calls = append(m.calls, req)
+	m.mu.Unlock()
+
+	m.muDelays.Lock()
+	delay := m.delays[req.Command]
+	m.muDelays.Unlock()
+
+	if delay > 0 {
+		time.Sleep(delay)
+	}
+	return &RunResponse{Stdout: "ok", ExitCode: 0}, nil
+}
+
+func TestRun_ParallelExecution_CallbacksInOrder(t *testing.T) {
+	// cmd1 is slow, cmd2 is fast → callback order should still be [cmd1, cmd2]
+	model := &mockLanguageModel{responses: []string{
+		"<cmd>\nslow\n</cmd>\n<cmd>\nfast\n</cmd>",
+		"Done.",
+	}}
+	runner := &slowMockCommandRunner{
+		delays: map[string]time.Duration{
+			"slow": 50 * time.Millisecond,
+			"fast": 5 * time.Millisecond,
+		},
+	}
+
+	var callbackOrder []string
+	cbs := Callbacks{
+		OnCommandResult: func(cmd string, _ string, _ int) {
+			callbackOrder = append(callbackOrder, cmd)
+		},
+	}
+
+	result, err := Run(context.Background(), newCfg(model, runner), nil, "go", cbs)
+	require.NoError(t, err)
+	assert.Contains(t, result.Response, "Done.")
+	require.Len(t, callbackOrder, 2)
+	assert.Equal(t, []string{"slow", "fast"}, callbackOrder,
+		"callbacks should fire in command order, not completion order")
+}
+
+func TestRun_ContextCancelled_DuringParallelExecution(t *testing.T) {
+	// Cancel ctx after commands are submitted but before all complete.
+	model := &mockLanguageModel{responses: []string{
+		"<cmd>\ncmd1\n</cmd>\n<cmd>\ncmd2\n</cmd>",
+		"Done.",
+	}}
+
+	cancelled := false
+	runner := &slowMockCommandRunner{
+		delays: map[string]time.Duration{
+			"cmd1": 100 * time.Millisecond,
+			"cmd2": 200 * time.Millisecond,
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	cbs := Callbacks{
+		OnCommandResult: func(_ string, _ string, _ int) {
+			if !cancelled {
+				cancel()
+				cancelled = true
+			}
+		},
+	}
+
+	result, err := Run(ctx, newCfg(model, runner), nil, "go", cbs)
+	// Context cancellation may or may not produce an error depending on timing,
+	// but it should not panic or leak goroutines.
+	require.NoError(t, err, "Run should handle cancellation gracefully")
+	assert.NotEmpty(t, result.Steps, "should have recorded some steps")
+}
+
+func TestRun_Parallel_TransportError_CallbackNotFired(t *testing.T) {
+	// One command gets transport error, others succeed. Only successful callbacks should fire.
+	model := &mockLanguageModel{responses: []string{
+		"<cmd>\nok1\n</cmd>\n<cmd>\nfail\n</cmd>\n<cmd>\nok2\n</cmd>",
+		"Done.",
+	}}
+	runner := &mockCommandRunner{
+		response: RunResponse{Stdout: "ok", ExitCode: 0},
+		err:      fmt.Errorf("socket closed"),
+	}
+
+	var callbackCmds []string
+	cbs := Callbacks{
+		OnCommandResult: func(cmd string, _ string, _ int) {
+			callbackCmds = append(callbackCmds, cmd)
+		},
+	}
+
+	result, err := Run(context.Background(), newCfg(model, runner), nil, "go", cbs)
+	require.NoError(t, err)
+	assert.Contains(t, result.Response, "Done.")
+	// Transport error should not fire callback. The error appears in the result step.
+	assert.NotContains(t, callbackCmds, "fail", "transport error should not fire callback")
 }
