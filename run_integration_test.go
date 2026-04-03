@@ -128,11 +128,15 @@ func (m *mockLanguageModelWithReasoning) StreamObject(
 }
 func (m *mockLanguageModelWithReasoning) Stream(_ context.Context, _ fantasy.Call) (fantasy.StreamResponse, error) {
 	return func(yield func(fantasy.StreamPart) bool) {
-		yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeReasoningStart, ID: "0"})                                            //nolint:errcheck
-		yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeReasoningDelta, ID: "0", Delta: m.reasoning})                        //nolint:errcheck
-		yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeReasoningDelta, ID: "0", ProviderMetadata: fantasy.ProviderMetadata{ //nolint:errcheck
-			anthropic.Name: &anthropic.ReasoningOptionMetadata{Signature: m.signature},
-		}})
+		yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeReasoningStart, ID: "0"})                     //nolint:errcheck
+		yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeReasoningDelta, ID: "0", Delta: m.reasoning}) //nolint:errcheck
+		yield(fantasy.StreamPart{                                                                          //nolint:errcheck
+			Type: fantasy.StreamPartTypeReasoningDelta,
+			ID:   "0",
+			ProviderMetadata: fantasy.ProviderMetadata{
+				anthropic.Name: &anthropic.ReasoningOptionMetadata{Signature: m.signature},
+			},
+		})
 		yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeReasoningEnd, ID: "0"})    //nolint:errcheck
 		yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextDelta, Delta: m.text}) //nolint:errcheck
 		yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeFinish})
@@ -396,11 +400,15 @@ func (m *mockLanguageModelTwoTurnsReasoning) Stream(_ context.Context, _ fantasy
 		reasoning := m.reasoning
 		sig := m.signature
 		return func(yield func(fantasy.StreamPart) bool) {
-			yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeReasoningStart, ID: "0"})                                            //nolint:errcheck
-			yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeReasoningDelta, ID: "0", Delta: reasoning})                          //nolint:errcheck
-			yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeReasoningDelta, ID: "0", ProviderMetadata: fantasy.ProviderMetadata{ //nolint:errcheck
-				anthropic.Name: &anthropic.ReasoningOptionMetadata{Signature: sig},
-			}})
+			yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeReasoningStart, ID: "0"})                   //nolint:errcheck
+			yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeReasoningDelta, ID: "0", Delta: reasoning}) //nolint:errcheck
+			yield(fantasy.StreamPart{                                                                        //nolint:errcheck
+				Type: fantasy.StreamPartTypeReasoningDelta,
+				ID:   "0",
+				ProviderMetadata: fantasy.ProviderMetadata{
+					anthropic.Name: &anthropic.ReasoningOptionMetadata{Signature: sig},
+				},
+			})
 			yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeReasoningEnd, ID: "0"})                 //nolint:errcheck
 			yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextDelta, Delta: "<cmd>\nls\n</cmd>"}) //nolint:errcheck
 			yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeFinish})                                //nolint:errcheck

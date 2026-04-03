@@ -466,47 +466,60 @@ func (f *streamFilter) Flush() {
 	f.buffering = false
 }
 
-// cmdBlockFilter intercepts <cmd>...</cmd> blocks in the streaming output.
-// Text outside blocks passes through to the delegate immediately. Block content
-// is buffered until </cmd> is seen, then emitted as a single complete
-// <cmd>...</cmd> chunk. This lets consumers (TUI, iOS) receive and render
-// command blocks atomically. buf holds either a partial <cmd> prefix (not in
-// block) or accumulated block content waiting for </cmd>.
-type cmdBlockFilter struct {
+// cmdBlockBuffer assembles <cmd>...</cmd> blocks from streaming deltas.
+// Emits atomic <cmd>...</cmd> chunks for commands, and prose text for display.
+// Consumers can discard chunks starting with "<cmd>" to get clean prose.
+type cmdBlockBuffer struct {
 	delegate func(string)
 	buf      strings.Builder
-	inBlock  bool
+	depth    int // nested block depth (>0 means inside block)
 }
 
-func (f *cmdBlockFilter) Write(delta string) {
-	// Prepend any buffered content from the previous call so we can match tags
-	// that span delta boundaries. buf holds either a partial <cmd> prefix (not in
-	// block) or all accumulated block content waiting for </cmd>.
+func (f *cmdBlockBuffer) Write(delta string) {
 	if f.buf.Len() > 0 {
 		delta = f.buf.String() + delta
 		f.buf.Reset()
 	}
 
 	for len(delta) > 0 {
-		if f.inBlock {
-			// Inside <cmd> block — look for </cmd>
-			idx := strings.Index(delta, CmdBlockClose)
-			if idx == -1 {
-				// No closing tag yet — buffer all content; the buf prepend at the top
-				// of Write will concatenate it with the next delta so </cmd> can be found.
+		if f.depth > 0 {
+			// Inside block — look for nested <cmd> or </cmd>
+			// Find next <cmd> or </cmd>
+			nextOpen := strings.Index(delta, CmdBlockOpen)
+			nextClose := strings.Index(delta, CmdBlockClose)
+			if nextOpen == -1 && nextClose == -1 {
 				f.buf.WriteString(delta)
 				return
 			}
-			// Found closing tag — emit complete block as one chunk, continue with remainder as prose
-			f.delegate(CmdBlockOpen + delta[:idx] + CmdBlockClose)
-			f.inBlock = false
-			delta = delta[idx+len(CmdBlockClose):]
+			if nextOpen != -1 && (nextClose == -1 || nextOpen < nextClose) {
+				// Nested <cmd> found first — include the <cmd> tag in buffer
+				f.buf.WriteString(delta[:nextOpen+len(CmdBlockOpen)])
+				delta = delta[nextOpen+len(CmdBlockOpen):]
+				f.depth++ // Entering nested block
+				continue
+			}
+			// </cmd> found (either first or no nested <cmd>)
+			before := delta[:nextClose]
+			remain := delta[nextClose+len(CmdBlockClose):]
+			f.buf.WriteString(before)
+			f.depth-- // Closed a block
+			if f.depth == 0 {
+				// Outer block closed — emit complete block
+				f.delegate(CmdBlockOpen + f.buf.String() + CmdBlockClose)
+				f.buf.Reset()
+				delta = remain
+				continue
+			}
+			// Inner block closed, still in outer block
+			f.buf.WriteString(CmdBlockClose)
+			delta = remain
 			continue
 		}
-		// Outside block — look for <cmd>
+
+		// Outside block — find <cmd>
 		idx := strings.Index(delta, CmdBlockOpen)
 		if idx == -1 {
-			// Check for partial <cmd> prefix at end of delta
+			// Check for partial <cmd> prefix at end
 			for plen := min(len(CmdBlockOpen)-1, len(delta)); plen > 0; plen-- {
 				if strings.HasSuffix(delta, CmdBlockOpen[:plen]) {
 					f.delegate(delta[:len(delta)-plen])
@@ -517,26 +530,25 @@ func (f *cmdBlockFilter) Write(delta string) {
 			f.delegate(delta)
 			return
 		}
-		// Pass through text before <cmd>, then enter block mode (content buffered until </cmd>)
+
+		// Found <cmd> — pass through text before, then enter block
 		if idx > 0 {
 			f.delegate(delta[:idx])
 		}
-		f.inBlock = true
+		f.depth = 1 // Entering outer block (depth 1 = inside block, 0 = outside)
 		delta = delta[idx+len(CmdBlockOpen):]
 	}
 }
 
-func (f *cmdBlockFilter) Flush() {
+func (f *cmdBlockBuffer) Flush() {
 	if f.buf.Len() > 0 {
-		if f.inBlock {
-			// Unclosed block — discard it (protocol content, not user output)
-			slog.Warn("cmdBlockFilter: stream ended with unclosed <cmd> block", "buffered_len", f.buf.Len())
+		if f.depth > 0 {
+			slog.Warn("cmdBlockBuffer: stream ended with unclosed <cmd> block", "buffered_len", f.buf.Len())
 		} else {
-			// Partial <cmd> prefix that never completed — forward it as prose
 			f.delegate(f.buf.String())
 		}
 		f.buf.Reset()
-		f.inBlock = false
+		f.depth = 0
 	}
 }
 
@@ -605,7 +617,7 @@ func streamOneTurn(
 	}
 
 	xmlFilter := &streamFilter{delegate: onDelta}
-	cmdFilter := &cmdBlockFilter{delegate: xmlFilter.Write}
+	cmdFilter := &cmdBlockBuffer{delegate: xmlFilter.Write}
 	// Order matters: cmdFilter.Flush() must run BEFORE xmlFilter.Flush().
 	// cmdFilter.Flush() may emit buffered content to xmlFilter.Write,
 	// so xmlFilter must still be accepting input. If reversed, that content is lost.
