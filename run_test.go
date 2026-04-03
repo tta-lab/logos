@@ -24,6 +24,7 @@ func TestScanCommands(t *testing.T) {
 		{"nested cmd in heredoc treated as content", "<cmd>\ncat <<'EOF'\nhello <cmd> world\nEOF\n</cmd>", []string{"cat <<'EOF'\nhello <cmd> world\nEOF"}},
 		{"nested cmd in echo arg", "<cmd>\necho hello <cmd> world\n</cmd>", []string{"echo hello <cmd> world"}},
 		{"multiple nested cmd blocks", "<cmd>\ncmd1\n</cmd><cmd>\ncmd2\n</cmd>", []string{"cmd1", "cmd2"}},
+		{"content after nested cmd preserved", "<cmd>\nouter start <cmd>nested</cmd> middle\n</cmd>", []string{"outer start <cmd>nested</cmd> middle"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

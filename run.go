@@ -237,7 +237,6 @@ func scanCommands(text string) []string {
 
 	for i := 0; i < len(text); {
 		if depth == 0 {
-			// Look for next <cmd>
 			idx := strings.Index(text[i:], openTag)
 			if idx == -1 {
 				break
@@ -248,31 +247,63 @@ func scanCommands(text string) []string {
 			continue
 		}
 
-		if depth == 1 {
-			// Look for </cmd> or nested <cmd>
-			// Check nested first (inner <cmd> would be content, not a real open)
-			nestedIdx := strings.Index(text[i:], openTag)
+		if depth >= 1 {
+			// Look for </cmd>
 			closeIdx := strings.Index(text[i:], closeTag)
-
 			if closeIdx == -1 {
-				// No close tag — discard unclosed block
 				break
 			}
+
+			// Check for <cmd> before this </cmd>
+			nestedIdx := strings.Index(text[i:], openTag)
+
 			if nestedIdx != -1 && nestedIdx < closeIdx {
-				// Nested <cmd> found first — it's content
-				buf.WriteByte(text[i])
-				i++
+				// Nested <cmd> found first — copy content before it AND the nested block
+				nestedCloseIdx := strings.Index(text[i+nestedIdx:], closeTag)
+				if nestedCloseIdx == -1 {
+					// Malformed: nested <cmd> with no close, treat rest as content
+					buf.WriteString(text[i:])
+					break
+				}
+				// Copy: content before nested <cmd> + nested <cmd>...</cmd>
+				buf.WriteString(text[i : i+nestedIdx+nestedCloseIdx+len(closeTag)])
+				i += nestedIdx + nestedCloseIdx + len(closeTag)
+				// After consuming the nested block, check if the nested </cmd> is also the
+				// outer </cmd> (no content between them).
+				// i >= len(text): consumed to end of string (nested </cmd> was the last tag).
+				// text[i:] == closeTag: remaining text IS just the outer </cmd>.
+				atOuterClose := i >= len(text) || text[i:] == closeTag
+				if atOuterClose {
+					// Emit content, stripping the nested </cmd> that we included in the buffer.
+					emitLen := buf.Len() - len(closeTag)
+					cmd := strings.TrimSpace(buf.String()[:emitLen])
+					if cmd != "" {
+						cmds = append(cmds, cmd)
+					}
+					if i < len(text) {
+						i += len(closeTag)
+					}
+					depth = 0
+					continue
+				}
 				continue
 			}
 
-			// Real close tag — copy all content before it into buffer
-			buf.WriteString(text[i : i+closeIdx])
-			cmd := strings.TrimSpace(buf.String())
-			if cmd != "" {
-				cmds = append(cmds, cmd)
+			// Real close tag — emit command
+			if depth == 1 {
+				buf.WriteString(text[i : i+closeIdx])
+				cmd := strings.TrimSpace(buf.String())
+				if cmd != "" {
+					cmds = append(cmds, cmd)
+				}
+				i += closeIdx + len(closeTag)
+				depth = 0
+				continue
 			}
+
+			// depth >= 2: nested </cmd> — decrement depth and skip past it
 			i += closeIdx + len(closeTag)
-			depth = 0
+			depth--
 			continue
 		}
 	}
@@ -324,7 +355,7 @@ func executeCommands(ctx context.Context, cfg Config, cbs Callbacks, cmds []stri
 
 // streamFilter sits between the LLM stream and OnDelta, filtering XML tool_call
 // markers (suppress + retry), bracket tool_call markers (suppress + retry), and
-// strip markers like &#x3c;result&#x3e; (tag-only removal — inter-tag content (tag-only removal — inter-tag content
+// strip markers like &#x3c;result&#x3e; (tag-only removal — inter-tag content
 // passes through unchanged).
 type streamFilter struct {
 	delegate         func(string)
