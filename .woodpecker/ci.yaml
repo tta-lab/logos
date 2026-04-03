@@ -10,11 +10,6 @@ when:
     branch: main
 
 steps:
-  - name: lint
-    image: golangci/golangci-lint:v2.10
-    commands:
-      - golangci-lint run --timeout=5m ./...
-
   - name: test
     image: golang:1.26
     commands:
