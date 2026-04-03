@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"charm.land/fantasy"
@@ -325,26 +326,102 @@ func ParseMessage(text string) (commands []string, prose string) {
 	return commands, proseBuf.String()
 }
 
-// executeCommands sends each command to temenos individually and formats results.
+// executeCommands runs commands in parallel and returns results in command order.
 // Fires OnCommandResult callback per command result.
-//
-// Transport errors are NOT surfaced via OnCommandResult — the error appears
-// in the output text sent back to the LLM so it can retry.
 func executeCommands(ctx context.Context, cfg Config, cbs Callbacks, cmds []string) []string {
-	var outputParts []string
-	for _, cmd := range cmds {
-		if ctx.Err() != nil {
-			break
+	if len(cmds) == 0 {
+		return nil
+	}
+
+	// Use parallel execution with workers up to command count
+	workers := len(cmds)
+	if workers > 8 {
+		workers = 8 // cap at 8 workers
+	}
+
+	exec := newCmdExecutor(ctx, cfg, cbs, workers)
+
+	// Submit all commands with their indices
+	for i, cmd := range cmds {
+		exec.submit(i, cmd)
+	}
+
+	// Wait for completion and collect results
+	exec.Done()
+	return exec.collectResults(len(cmds))
+}
+
+// cmdResult holds a command execution result with its index for ordering.
+type cmdResult struct {
+	index  int
+	output string
+}
+
+// cmdExecutor runs commands in parallel via goroutines.
+type cmdExecutor struct {
+	ctx     context.Context
+	cfg     Config
+	cbs     Callbacks
+	cmdCh   chan cmdTask
+	results chan cmdResult
+	wg      sync.WaitGroup
+}
+
+// cmdTask is a command with its index for ordering.
+type cmdTask struct {
+	index int
+	cmd   string
+}
+
+// newCmdExecutor creates a command executor with the given number of workers.
+func newCmdExecutor(ctx context.Context, cfg Config, cbs Callbacks, workers int) *cmdExecutor {
+	e := &cmdExecutor{
+		ctx:     ctx,
+		cfg:     cfg,
+		cbs:     cbs,
+		cmdCh:   make(chan cmdTask, workers),
+		results: make(chan cmdResult, workers),
+	}
+	for i := 0; i < workers; i++ {
+		e.wg.Add(1)
+		go e.worker()
+	}
+	return e
+}
+
+// submit sends a command to the executor with its index.
+func (e *cmdExecutor) submit(index int, cmd string) {
+	select {
+	case e.cmdCh <- cmdTask{index: index, cmd: cmd}:
+	case <-e.ctx.Done():
+	}
+}
+
+// Done waits for all workers to finish and closes the results channel.
+func (e *cmdExecutor) Done() {
+	close(e.cmdCh)
+	e.wg.Wait()
+	close(e.results)
+}
+
+// worker runs a command execution goroutine.
+func (e *cmdExecutor) worker() {
+	defer e.wg.Done()
+	for task := range e.cmdCh {
+		select {
+		case <-e.ctx.Done():
+			return
+		default:
 		}
 
-		resp, err := cfg.Temenos.Run(ctx, RunRequest{
-			Command:      cmd,
-			Env:          cfg.SandboxEnv,
-			AllowedPaths: cfg.AllowedPaths,
+		resp, err := e.cfg.Temenos.Run(e.ctx, RunRequest{
+			Command:      task.cmd,
+			Env:          e.cfg.SandboxEnv,
+			AllowedPaths: e.cfg.AllowedPaths,
 		})
 		if err != nil {
 			slog.Error("temenos Run failure", "error", err)
-			outputParts = append(outputParts, fmt.Sprintf("execution error: %v", err))
+			e.results <- cmdResult{index: task.index, output: fmt.Sprintf("execution error: %v", err)}
 			continue
 		}
 
@@ -355,24 +432,34 @@ func executeCommands(ctx context.Context, cfg Config, cbs Callbacks, cmds []stri
 		if output == "" {
 			output = "(no output)"
 		}
-		if cbs.OnCommandResult != nil {
-			cbs.OnCommandResult(cmd, output, resp.ExitCode)
+		if e.cbs.OnCommandResult != nil {
+			e.cbs.OnCommandResult(task.cmd, output, resp.ExitCode)
 		}
 
-		formatted := cmd + "\n" + output
+		formatted := task.cmd + "\n" + output
 		if resp.ExitCode != 0 && resp.ExitCode != -1 {
 			formatted += fmt.Sprintf("\n(exit code: %d)", resp.ExitCode)
 		}
-		outputParts = append(outputParts, formatted)
+		e.results <- cmdResult{index: task.index, output: formatted}
 	}
-	return outputParts
 }
 
-// streamFilter sits between the LLM stream and OnDelta, filtering XML tool_call
-// markers (suppress + retry), bracket tool_call markers (suppress + retry), and
-// strip markers like &#x3c;result&#x3e; (tag-only removal — inter-tag content
-// passes through unchanged).
-type streamFilter struct {
+// collectResults waits for all results and returns them in command order.
+func (e *cmdExecutor) collectResults(count int) []string {
+	results := make([]string, count)
+	for i := 0; i < count; i++ {
+		result, ok := <-e.results
+		if !ok {
+			break
+		}
+		results[result.index] = result.output
+	}
+	return results
+}
+
+// proseFilter filters hallucinated tool_call patterns from streaming output.
+// Passes clean prose to delegate, suppresses content with tool_call markers.
+type proseFilter struct {
 	delegate         func(string)
 	buf              strings.Builder
 	buffering        bool
@@ -381,7 +468,7 @@ type streamFilter struct {
 
 // Write processes a streaming delta. Fast path: no '<' or '[' → pass through immediately.
 // Otherwise buffers from the first trigger character and checks for known markers.
-func (f *streamFilter) Write(delta string) {
+func (f *proseFilter) Write(delta string) {
 	if f.toolCallDetected {
 		return
 	}
@@ -407,7 +494,7 @@ func (f *streamFilter) Write(delta string) {
 }
 
 // checkBuffer inspects the current buffer for known markers and acts accordingly.
-func (f *streamFilter) checkBuffer() {
+func (f *proseFilter) checkBuffer() {
 	bufStr := f.buf.String()
 
 	// Tier 1a: XML tool_call — suppress entire stream, signal retry.
@@ -440,7 +527,7 @@ func (f *streamFilter) checkBuffer() {
 }
 
 // Flush flushes any remaining buffered content when the stream ends.
-func (f *streamFilter) Flush() {
+func (f *proseFilter) Flush() {
 	if f.buf.Len() > 0 && !f.toolCallDetected {
 		f.delegate(f.buf.String())
 	}
@@ -597,12 +684,12 @@ func streamOneTurn(
 		return "", "", "", false, streamErr
 	}
 
-	xmlFilter := &streamFilter{delegate: onDelta}
-	cmdFilter := &cmdBlockBuffer{delegate: xmlFilter.Write}
-	// Order matters: cmdFilter.Flush() must run BEFORE xmlFilter.Flush().
-	// cmdFilter.Flush() may emit buffered content to xmlFilter.Write,
-	// so xmlFilter must still be accepting input. If reversed, that content is lost.
-	defer func() { cmdFilter.Flush(); xmlFilter.Flush() }()
+	hallucinationFilter := &proseFilter{delegate: onDelta}
+	cmdFilter := &cmdBlockBuffer{delegate: hallucinationFilter.Write}
+	// Order matters: cmdFilter.Flush() must run BEFORE hallucinationFilter.Flush().
+	// cmdFilter.Flush() may emit buffered content to hallucinationFilter.Write,
+	// so hallucinationFilter must still be accepting input. If reversed, that content is lost.
+	defer func() { cmdFilter.Flush(); hallucinationFilter.Flush() }()
 
 	var fullText strings.Builder
 	var reasoningBuf strings.Builder
@@ -626,11 +713,11 @@ func streamOneTurn(
 			}
 		case fantasy.StreamPartTypeError:
 			if part.Error != nil {
-				return fullText.String(), reasoningBuf.String(), reasoningSig, xmlFilter.toolCallDetected, part.Error
+				return fullText.String(), reasoningBuf.String(), reasoningSig, hallucinationFilter.toolCallDetected, part.Error
 			}
 		}
 	}
-	return fullText.String(), reasoningBuf.String(), reasoningSig, xmlFilter.toolCallDetected, nil
+	return fullText.String(), reasoningBuf.String(), reasoningSig, hallucinationFilter.toolCallDetected, nil
 }
 
 // newAssistantMessage wraps text (and optional reasoning) as a fantasy assistant message.

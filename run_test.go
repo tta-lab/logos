@@ -109,11 +109,11 @@ func TestParseMessage(t *testing.T) {
 	}
 }
 
-// --- streamFilter tests ---
+// --- proseFilter tests ---
 
 func TestStreamFilter_FastPath_NoAngle(t *testing.T) {
 	var got []string
-	f := &streamFilter{delegate: func(s string) { got = append(got, s) }}
+	f := &proseFilter{delegate: func(s string) { got = append(got, s) }}
 	f.Write("hello world")
 	f.Flush()
 	if len(got) != 1 || got[0] != "hello world" {
@@ -126,7 +126,7 @@ func TestStreamFilter_FastPath_NoAngle(t *testing.T) {
 
 func TestStreamFilter_Tier1_XMLToolCall(t *testing.T) {
 	var got []string
-	f := &streamFilter{delegate: func(s string) { got = append(got, s) }}
+	f := &proseFilter{delegate: func(s string) { got = append(got, s) }}
 	f.Write("<tool_call>echo hello</tool_call>")
 	f.Flush()
 	if len(got) != 0 {
@@ -139,7 +139,7 @@ func TestStreamFilter_Tier1_XMLToolCall(t *testing.T) {
 
 func TestStreamFilter_Tier1_SplitAcrossDeltas(t *testing.T) {
 	var got []string
-	f := &streamFilter{delegate: func(s string) { got = append(got, s) }}
+	f := &proseFilter{delegate: func(s string) { got = append(got, s) }}
 	f.Write("<tool_")
 	f.Write("call>")
 	f.Flush()
@@ -153,7 +153,7 @@ func TestStreamFilter_Tier1_SplitAcrossDeltas(t *testing.T) {
 
 func TestStreamFilter_HarmlessAngle_NotDetected(t *testing.T) {
 	var got []string
-	f := &streamFilter{delegate: func(s string) { got = append(got, s) }}
+	f := &proseFilter{delegate: func(s string) { got = append(got, s) }}
 	f.Write("<p>some content</p>")
 	f.Flush()
 	combined := ""
@@ -170,7 +170,7 @@ func TestStreamFilter_HarmlessAngle_NotDetected(t *testing.T) {
 
 func TestStreamFilter_BufferAtStreamEnd(t *testing.T) {
 	var got []string
-	f := &streamFilter{delegate: func(s string) { got = append(got, s) }}
+	f := &proseFilter{delegate: func(s string) { got = append(got, s) }}
 	f.Write("text<")
 	f.Flush() // trailing < should be flushed
 	combined := ""
@@ -329,7 +329,7 @@ func TestCmdBlockFilter_CompleteBlockThenUnclosed(t *testing.T) {
 
 func TestStreamFilter_BracketToolCall(t *testing.T) {
 	var got []string
-	f := &streamFilter{delegate: func(s string) { got = append(got, s) }}
+	f := &proseFilter{delegate: func(s string) { got = append(got, s) }}
 	f.Write("[TOOL_CALL]{tool => 'shell', args => { --command 'ls' }}[/TOOL_CALL]")
 	f.Flush()
 	if len(got) != 0 {
@@ -390,7 +390,7 @@ func TestCmdBlockBuffer_NestedBlocks(t *testing.T) {
 
 func TestStreamFilter_BracketToolCall_CaseInsensitive(t *testing.T) {
 	var got []string
-	f := &streamFilter{delegate: func(s string) { got = append(got, s) }}
+	f := &proseFilter{delegate: func(s string) { got = append(got, s) }}
 	f.Write("[tool_call]some content[/tool_call]")
 	f.Flush()
 	if len(got) != 0 {
@@ -403,7 +403,7 @@ func TestStreamFilter_BracketToolCall_CaseInsensitive(t *testing.T) {
 
 func TestStreamFilter_BracketToolCall_SplitAcrossDeltas(t *testing.T) {
 	var got []string
-	f := &streamFilter{delegate: func(s string) { got = append(got, s) }}
+	f := &proseFilter{delegate: func(s string) { got = append(got, s) }}
 	f.Write("[TOOL_")
 	f.Write("CALL]")
 	f.Flush()
@@ -417,7 +417,7 @@ func TestStreamFilter_BracketToolCall_SplitAcrossDeltas(t *testing.T) {
 
 func TestStreamFilter_HarmlessBracket_NotDetected(t *testing.T) {
 	var got []string
-	f := &streamFilter{delegate: func(s string) { got = append(got, s) }}
+	f := &proseFilter{delegate: func(s string) { got = append(got, s) }}
 	f.Write("[some content]")
 	f.Flush()
 	combined := ""
@@ -434,7 +434,7 @@ func TestStreamFilter_HarmlessBracket_NotDetected(t *testing.T) {
 
 func TestStreamFilter_TextBeforeBracketToolCall(t *testing.T) {
 	var got []string
-	f := &streamFilter{delegate: func(s string) { got = append(got, s) }}
+	f := &proseFilter{delegate: func(s string) { got = append(got, s) }}
 	f.Write("some text before [TOOL_CALL]bad[/TOOL_CALL]")
 	f.Flush()
 	combined := ""
