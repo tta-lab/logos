@@ -6,6 +6,45 @@ Stateless agent loop for Go. LLMs think in plain text and act via `§ ` prefixed
 prompt → LLM → scan <cmd> blocks for "§ command" → execute in sandbox → feed <result> back → repeat
 ```
 
+## Library Mode
+
+For callers that already have an assistant message in hand and want to run
+its `<cmd>` blocks without driving a full agent loop, use the library API:
+
+```go
+import (
+    "context"
+
+    "github.com/tta-lab/logos"
+)
+
+func dispatch(ctx context.Context, assistantMsg string) (string, error) {
+    cmds := logos.ParseCmdBlocks(assistantMsg)
+    if len(cmds) == 0 {
+        return "", nil
+    }
+    runner, err := logos.NewTemenosRunner("")
+    if err != nil {
+        return "", err
+    }
+    results := logos.ExecuteBlocks(ctx, logos.ExecConfig{
+        Runner: runner,
+        Env: map[string]string{"MY_VAR": "value"},
+        AllowedPaths: []logos.AllowedPath{
+            {Path: "/ro/project", ReadOnly: true},
+            {Path: "/rw/workspace", ReadOnly: false},
+        },
+        TimeoutSec: 120,
+    }, cmds)
+    return logos.FormatResults(results), nil
+}
+```
+
+Env, AllowedPaths (ReadOnly:true for read, ReadOnly:false for write), and TimeoutSec
+give consumers full control over the sandbox without importing temenos directly.
+Use `logos.StripCmdBlocks` to get the prose portion of the message when you want
+to display the assistant text to a human without the tool calls.
+
 ## Install
 
 ```bash
@@ -64,6 +103,12 @@ logos detects the commands, executes them in a [temenos](https://github.com/tta-
 | `StepMessage` | One message in the loop (assistant text, with optional reasoning, or command output) |
 | `Callbacks` | Optional `OnDelta` and `OnCommandStart` streaming hooks |
 | `CommandRunner` | Interface for command execution — temenos satisfies it |
+| `ParseCmdBlocks` | Extract `<cmd>` block contents from a complete assistant message |
+| `ExecuteBlocks` | Run parsed commands concurrently, return `[]Result` |
+| `FormatResults` | Render `[]Result` as a `<result>` wrap for the model |
+| `NewTemenosRunner` | Create a temenos CommandRunner (zero temenos import required) |
+| `Result` | One command's execution outcome (Command, Stdout, Stderr, ExitCode, Err) |
+| `ExecConfig` | Execution knobs: Runner, Env, AllowedPaths, TimeoutSec |
 
 ## System prompt
 

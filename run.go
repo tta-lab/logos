@@ -295,7 +295,10 @@ func (e *cmdExecutor) worker() {
 		})
 		if err != nil {
 			slog.Error("temenos Run failure", "error", err)
-			e.resultsCh <- cmdResult{index: task.index, output: fmt.Sprintf("execution error: %v", err)}
+			e.resultsCh <- cmdResult{
+				index:  task.index,
+				output: formatOneResult(Result{Command: task.cmd, Err: err}),
+			}
 			continue
 		}
 
@@ -307,16 +310,20 @@ func (e *cmdExecutor) worker() {
 			output = "(no output)"
 		}
 
-		formatted := task.cmd + "\n" + output
-		if resp.ExitCode != 0 && resp.ExitCode != -1 {
-			formatted += fmt.Sprintf("\n(exit code: %d)", resp.ExitCode)
-		}
-
 		var cb *callbackData
 		if e.cbs.OnCommandResult != nil {
 			cb = &callbackData{command: task.cmd, output: output, exitCode: resp.ExitCode}
 		}
-		e.resultsCh <- cmdResult{index: task.index, output: formatted, callback: cb}
+		e.resultsCh <- cmdResult{
+			index: task.index,
+			output: formatOneResult(Result{
+				Command:  task.cmd,
+				Stdout:   resp.Stdout,
+				Stderr:   resp.Stderr,
+				ExitCode: resp.ExitCode,
+			}),
+			callback: cb,
+		}
 	}
 }
 
