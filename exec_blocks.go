@@ -25,28 +25,39 @@ type Result struct {
 }
 
 // ExecConfig holds the knobs ExecuteBlocks needs to dispatch cmds to a runner.
-// Runner is required. Env, AllowedPaths, TimeoutSec are optional and map
-// directly to temenos client.RunRequest fields.
+// runner is required and set by NewExecConfig. Env, AllowedPaths, TimeoutSec
+// are optional and map directly to temenos client.RunRequest fields.
 type ExecConfig struct {
-	Runner       CommandRunner
+	runner       commandRunner
 	Env          map[string]string
-	AllowedPaths []AllowedPath
+	AllowedPaths []client.AllowedPath
 	TimeoutSec   int // maps to RunRequest.Timeout; 0 = daemon default (seconds)
 }
 
-// ExecuteBlocks runs each cmd concurrently against cfg.Runner and returns
+// NewExecConfig creates an ExecConfig by resolving the runner from cfg.
+// Uses localRunner if cfg.Sandbox is false; uses temenos client if true.
+// Returns an error only if Sandbox is true but temenos is unreachable.
+func NewExecConfig(cfg Config) (ExecConfig, error) {
+	runner, err := resolveRunner(&cfg)
+	if err != nil {
+		return ExecConfig{}, err
+	}
+	return ExecConfig{runner: runner}, nil
+}
+
+// ExecuteBlocks runs each cmd concurrently against cfg.runner and returns
 // results in the original order of cmds. Worker pool is capped at 8. Ctx
 // cancellation stops new task submissions; already-submitted tasks run to
 // completion (their Results will contain ctx.Err() on premature exit).
 // Empty cmds returns nil.
 //
-// ExecuteBlocks panics if cfg.Runner is nil.
+// ExecuteBlocks panics if cfg.runner is nil.
 func ExecuteBlocks(ctx context.Context, cfg ExecConfig, cmds []string) []Result {
 	if len(cmds) == 0 {
 		return nil
 	}
-	if cfg.Runner == nil {
-		panic("logos.ExecuteBlocks: cfg.Runner is nil")
+	if cfg.runner == nil {
+		panic("logos.ExecuteBlocks: cfg.runner is nil")
 	}
 
 	resultsCh := make(chan blockResult, len(cmds))
@@ -61,15 +72,6 @@ func ExecuteBlocks(ctx context.Context, cfg ExecConfig, cmds []string) []Result 
 	}
 	exec.Done()
 	return collectOrderedBlocks(resultsCh, len(cmds))
-}
-
-// NewTemenosRunner returns a CommandRunner that connects to the temenos daemon
-// at socketPath. An empty socketPath uses the daemon's default resolution
-// (~/.temenos/daemon.sock with ~ expansion). The returned runner satisfies the
-// CommandRunner interface for use with ExecConfig.Runner.
-func NewTemenosRunner(socketPath string) (CommandRunner, error) {
-	c, err := client.New(socketPath)
-	return c, err
 }
 
 // blockResult holds a command result with its index for ordering.
@@ -136,13 +138,13 @@ func (e *blockExecutor) worker() {
 		default:
 		}
 
-		req := RunRequest{
+		req := client.RunRequest{
 			Command:      task.cmd,
 			Env:          e.cfg.Env,
 			AllowedPaths: e.cfg.AllowedPaths,
 			Timeout:      e.cfg.TimeoutSec,
 		}
-		resp, err := e.cfg.Runner.Run(e.ctx, req)
+		resp, err := e.cfg.runner.Run(e.ctx, req)
 		if err != nil {
 			e.resultsCh <- blockResult{index: task.index, cmd: task.cmd, err: err}
 			continue

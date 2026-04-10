@@ -3,8 +3,15 @@
 Stateless agent loop for Go. LLMs think in plain text and act via `§ ` prefixed shell commands inside `<cmd>` blocks — no tool schemas, no JSON.
 
 ```
-prompt → LLM → scan <cmd> blocks for "§ command" → execute in sandbox → feed <result> back → repeat
+prompt → LLM → scan <cmd> blocks for "§ command" → execute → feed <result> back → repeat
 ```
+
+## Backends
+
+logos supports two command execution backends, selected by `Config.Sandbox`:
+
+- **`Sandbox: false`** — local exec via `/bin/bash`. No daemon required. Commands run directly on the host. Useful for development and environments where a sandbox daemon is unavailable.
+- **`Sandbox: true`** — sandboxed exec via [temenos](https://github.com/tta-lab/temenos). Commands run in a restricted environment. Requires a running temenos daemon. Set `SandboxAddr` to override the socket path (empty uses `TEMENOS_LISTEN_ADDR` → `TEMENOS_SOCKET_PATH` → `~/.temenos/daemon.sock`).
 
 ## Library Mode
 
@@ -23,25 +30,23 @@ func dispatch(ctx context.Context, assistantMsg string) (string, error) {
     if len(cmds) == 0 {
         return "", nil
     }
-    runner, err := logos.NewTemenosRunner("")
-    if err != nil {
-        return "", err
-    }
-    results := logos.ExecuteBlocks(ctx, logos.ExecConfig{
-        Runner: runner,
+    cfg, err := logos.NewExecConfig(logos.Config{
+        Sandbox: true, // or false for local exec
         Env: map[string]string{"MY_VAR": "value"},
-        AllowedPaths: []logos.AllowedPath{
+        AllowedPaths: []client.AllowedPath{
             {Path: "/ro/project", ReadOnly: true},
             {Path: "/rw/workspace", ReadOnly: false},
         },
         TimeoutSec: 120,
-    }, cmds)
+    })
+    if err != nil {
+        return "", err
+    }
+    results := logos.ExecuteBlocks(ctx, cfg, cmds)
     return logos.FormatResults(results), nil
 }
 ```
 
-Env, AllowedPaths (ReadOnly:true for read, ReadOnly:false for write), and TimeoutSec
-give consumers full control over the sandbox without importing temenos directly.
 Use `logos.StripCmdBlocks` to get the prose portion of the message when you want
 to display the assistant text to a human without the tool calls.
 
@@ -55,20 +60,18 @@ go get github.com/tta-lab/logos
 
 ```go
 result, err := logos.Run(ctx, logos.Config{
-    Provider:     provider,        // fantasy.Provider (LLM abstraction)
+    Provider:     provider,     // fantasy.Provider (LLM abstraction)
     Model:        "claude-sonnet-4-6",
     SystemPrompt: systemPrompt,
-    Temenos:      temenosClient,   // sandboxed command runner
+    Sandbox:      true,        // true = temenos sandbox, false = local exec
+    SandboxAddr:  "",         // optional; empty uses env fallback
     SandboxEnv:   map[string]string{"HOME": "/app"},
     AllowedPaths: []client.AllowedPath{
-        {Path: "/app", Permission: "rw"},
+        {Path: "/app", ReadOnly: false},
     },
 }, history, "read main.go and explain what it does", logos.Callbacks{
     OnDelta: func(text string) {
         fmt.Print(text) // stream to terminal
-    },
-    OnCommandStart: func(cmd string) {
-        fmt.Printf("\n> %s\n", cmd)
     },
 })
 ```
@@ -83,14 +86,14 @@ Let me check the file structure first.
 </cmd>
 ```
 
-logos detects the commands, executes them in a [temenos](https://github.com/tta-lab/temenos) sandbox, and feeds the output back wrapped in `<result>`. The loop continues until the LLM responds without any `<cmd>` blocks.
+logos detects the commands, executes them in the configured backend, and feeds the output back wrapped in `<result>`. The loop continues until the LLM responds without any `<cmd>` blocks.
 
 ## How it works
 
 1. **`Run()`** takes config, conversation history, a prompt, and streaming callbacks
 2. Each turn, the LLM streams a response
 3. **`scanAllCommands()`** extracts all `§ ` lines from `<cmd>...</cmd>` blocks
-4. Commands run via the `CommandRunner` interface (temenos sandbox)
+4. Commands run via the configured backend (localRunner or temenos)
 5. Output wrapped in `<result>` becomes the next user message; loop repeats
 6. When the LLM responds with no `<cmd>` blocks, the loop ends and returns `RunResult`
 
@@ -98,17 +101,16 @@ logos detects the commands, executes them in a [temenos](https://github.com/tta-
 
 | Type | Purpose |
 |------|---------|
-| `Config` | Provider, model, temenos client, sandbox env, allowed paths |
+| `Config` | Provider, model, Sandbox/SandboxAddr, sandbox env, allowed paths |
 | `RunResult` | Final response text + all step messages |
 | `StepMessage` | One message in the loop (assistant text, with optional reasoning, or command output) |
-| `Callbacks` | Optional `OnDelta` and `OnCommandStart` streaming hooks |
-| `CommandRunner` | Interface for command execution — temenos satisfies it |
+| `Callbacks` | Optional `OnDelta` and `OnCommandResult` streaming hooks |
 | `ParseCmdBlocks` | Extract `<cmd>` block contents from a complete assistant message |
 | `ExecuteBlocks` | Run parsed commands concurrently, return `[]Result` |
 | `FormatResults` | Render `[]Result` as a `<result>` wrap for the model |
-| `NewTemenosRunner` | Create a temenos CommandRunner (zero temenos import required) |
+| `NewExecConfig` | Create an `ExecConfig` from `Config` (selects runner) |
 | `Result` | One command's execution outcome (Command, Stdout, Stderr, ExitCode, Err) |
-| `ExecConfig` | Execution knobs: Runner, Env, AllowedPaths, TimeoutSec |
+| `ExecConfig` | Execution knobs: Env, AllowedPaths, TimeoutSec |
 
 ## System prompt
 
@@ -128,7 +130,7 @@ systemPrompt := base + "\n\n" + customInstructions
 
 - **Stateless** — `Run()` takes history in, returns steps out. The caller owns persistence.
 - **Multi-command blocks** — all `§ ` lines inside a `<cmd>` block run sequentially; bare `§` outside blocks are prose and ignored.
-- **Sandboxed** — commands execute in [temenos](https://github.com/tta-lab/temenos), not on the host.
+- **Dual backend** — sandbox (temenos) or local exec (`/bin/bash`), selected via `Config.Sandbox`.
 - **Provider-agnostic** — uses [fantasy](https://charm.land/fantasy) for LLM abstraction.
 - **Reasoning round-trip** — thinking blocks (Anthropic extended thinking) captured in `StepMessage.Reasoning` and `ReasoningSignature` for conversation restoration.
 

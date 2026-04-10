@@ -40,19 +40,10 @@ const CmdBlockOpen = "<cmd>"
 const CmdBlockClose = "</cmd>"
 
 // Re-exported from temenos/client so consumers don't import temenos directly.
-type (
-	// AllowedPath specifies a filesystem path allowed in the sandbox.
-	AllowedPath = client.AllowedPath
-	// RunRequest is the request payload for single command execution.
-	RunRequest = client.RunRequest
-	// RunResponse is the response from single command execution.
-	RunResponse = client.RunResponse
-)
-
-// CommandRunner executes a single command in the sandbox.
-// *client.Client satisfies this interface automatically.
-type CommandRunner interface {
-	Run(ctx context.Context, req RunRequest) (*RunResponse, error)
+// commandRunner executes a single command.
+// Both *client.Client and *localRunner satisfy this interface.
+type commandRunner interface {
+	Run(ctx context.Context, req client.RunRequest) (*client.RunResponse, error)
 }
 
 // Config holds everything needed to run one agent loop iteration.
@@ -60,13 +51,21 @@ type Config struct {
 	Provider     fantasy.Provider
 	Model        string
 	SystemPrompt string
-	MaxSteps     int // 0 means use default (DefaultMaxSteps)
-	MaxTokens    int // 0 means use default (DefaultMaxTokens)
-	Temenos      CommandRunner
-	SandboxEnv   map[string]string // env vars passed to temenos per-request
+	MaxSteps     int               // 0 means use default (DefaultMaxSteps)
+	MaxTokens    int               // 0 means use default (DefaultMaxTokens)
+	Sandbox      bool              // true = require temenos sandbox; false = use local exec
+	SandboxAddr  string            // temenos socket/address; empty = env fallback chain
+	SandboxEnv   map[string]string // env vars passed to sandbox per-request
 	// AllowedPaths lists filesystem paths accessible during command execution.
 	// Path validation (non-empty, absolute) is enforced by the temenos daemon.
-	AllowedPaths []AllowedPath
+	// Note: localRunner (Sandbox=false) uses AllowedPaths[0].Path as the working
+	// directory; additional entries are ignored (no RO enforcement).
+	AllowedPaths []client.AllowedPath
+
+	// runner is resolved by resolveRunner() before use. testRunner is for unit
+	// tests in the same package (injected via withTestRunner helper).
+	runner     commandRunner
+	testRunner commandRunner
 }
 
 // StepMessage represents one message generated during the agent loop.
@@ -109,8 +108,10 @@ func Run(
 	if cfg.Provider == nil {
 		return nil, fmt.Errorf("logos: Config.Provider must not be nil")
 	}
-	if cfg.Temenos == nil {
-		return nil, fmt.Errorf("logos: Config.Temenos must not be nil")
+	var err error
+	cfg.runner, err = resolveRunner(&cfg)
+	if err != nil {
+		return nil, err
 	}
 
 	model, err := cfg.Provider.LanguageModel(ctx, cfg.Model)
@@ -288,7 +289,7 @@ func (e *cmdExecutor) worker() {
 		default:
 		}
 
-		resp, err := e.cfg.Temenos.Run(e.ctx, RunRequest{
+		resp, err := e.cfg.runner.Run(e.ctx, client.RunRequest{
 			Command:      task.cmd,
 			Env:          e.cfg.SandboxEnv,
 			AllowedPaths: e.cfg.AllowedPaths,

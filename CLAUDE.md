@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What is logos
 
-logos is a Go library that implements a stateless agent loop. LLMs think in plain text and act via `§ ` prefixed shell commands inside `<cmd>...</cmd>` blocks — no tool schemas, no JSON. The loop is: prompt → LLM → scan for `<cmd>` block with `§ command` → execute in sandbox → feed `<result>` back → repeat.
+logos is a Go library that implements a stateless agent loop. LLMs think in plain text and act via `§ ` prefixed shell commands inside `<cmd>` blocks — no tool schemas, no JSON. The loop is: prompt → LLM → scan for `<cmd>` block with `§ command` → execute in sandbox → feed `<result>` back → repeat.
 
 ## Key dependencies
 
@@ -32,19 +32,26 @@ Pre-commit hooks (lefthook): fmt check, vet, lint — run in parallel.
 
 This is a single-package library (`package logos`). All source is at the root.
 
-- **run.go** — Core `Run()` function: the agent loop. Takes `Config` (provider, model, temenos client, sandbox env), conversation history, a prompt, and streaming callbacks. Returns `RunResult` with accumulated response text and step messages. Internally uses `scanAllCommands` to detect `§ ` lines inside `<cmd>...</cmd>` blocks, executes them via `CommandRunner` interface, and feeds output back wrapped in `<result>...</result>`.
+- **run.go** — Core `Run()` function: the agent loop. Takes `Config` (provider, model, Sandbox, SandboxAddr, sandbox env), conversation history, a prompt, and streaming callbacks. Returns `RunResult` with accumulated response text and step messages. Internally uses `resolveRunner` to select either `localRunner` (unsandboxed `/bin/bash`) or temenos client, then executes commands via `commandRunner` interface.
+- **local_runner.go** — `localRunner`: unsandboxed command execution via `os/exec`. Selected when `Config.Sandbox` is false.
+- **runner_resolve.go** — `resolveRunner`: selects the appropriate `commandRunner` from `Config`.
+- **client.go** — `newClient`: creates a temenos `*client.Client`.
 - **parse.go** — `ParseCommand()`: detects lines starting with `§ ` (after optional whitespace) and extracts the command args.
-- **prompt.go** — `BuildSystemPrompt()`: renders `system.md.tpl` (embedded via `//go:embed`) with runtime context (working dir, platform, date) and caller-provided `CommandDoc` entries. No built-in tool knowledge — consumers provide command documentation via `PromptData.Commands`. Consumers append their own instructions after the base prompt.
+- **prompt.go** — `BuildSystemPrompt()`: renders `system.md.tpl` (embedded via `//go:embed`) with runtime context.
 - **system.md.tpl** — Go template for the system prompt. Instructs the LLM to wrap `§ ` commands in `<cmd>...</cmd>` blocks.
+- **exec_blocks.go** — `ExecuteBlocks()` and `NewExecConfig()`: library-mode API for running parsed commands.
 
 ## Design principles
 
 - **Stateless**: `Run()` takes history in, returns steps out. The caller owns persistence.
 - **Multi-command blocks**: `scanAllCommands` extracts all `§ ` lines from `<cmd>...</cmd>` blocks; bare `§` outside blocks are prose and ignored.
-- **CommandRunner interface**: `temenos/client.Client` satisfies it, but tests use mock implementations.
+- **Dual backend**: `Config.Sandbox` selects `localRunner` (false) or temenos client (true). `resolveRunner` handles the selection.
+- **Internal runner surface**: `commandRunner`, `localRunner`, `newClient`, `resolveRunner` are all unexported. The only public entry points are `Run()` and `ExecuteBlocks()` + `NewExecConfig()`.
 
 ## Testing
 
 - Unit tests use mock provider/runner (defined in `run_integration_test.go`)
+- `local_runner_test.go`: unit tests for `localRunner`
+- `runner_resolve_test.go`: unit tests for `resolveRunner` and e2e test for `Sandbox:false` path
 - Integration test (`TestRun_HttpServer_JsonEncodingRoundtrip`) spins up a fake temenos HTTP server over a unix socket
 - Uses `testify` for assertions

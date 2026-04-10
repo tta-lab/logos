@@ -10,20 +10,21 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/tta-lab/temenos/client"
 )
 
-// fakeRunner implements CommandRunner for testing.
+// fakeRunner implements commandRunner for testing.
 type fakeRunner struct {
 	sleepDur time.Duration
 	err      error
 	exitCode int
 	stderr   string
 	reqsMu   sync.Mutex
-	reqs     []RunRequest
+	reqs     []client.RunRequest
 	maxCon   atomic.Int32
 }
 
-func (f *fakeRunner) Run(ctx context.Context, req RunRequest) (_ *RunResponse, _ error) {
+func (f *fakeRunner) Run(ctx context.Context, req client.RunRequest) (_ *client.RunResponse, _ error) {
 	f.maxCon.Add(1)
 	defer f.maxCon.Add(-1)
 
@@ -41,7 +42,7 @@ func (f *fakeRunner) Run(ctx context.Context, req RunRequest) (_ *RunResponse, _
 	if f.err != nil {
 		return nil, f.err
 	}
-	return &RunResponse{
+	return &client.RunResponse{
 		Stdout:   req.Command + " output",
 		Stderr:   f.stderr,
 		ExitCode: f.exitCode,
@@ -50,10 +51,10 @@ func (f *fakeRunner) Run(ctx context.Context, req RunRequest) (_ *RunResponse, _
 
 func (f *fakeRunner) MaxConcurrent() int32 { return f.maxCon.Load() }
 
-func (f *fakeRunner) calls() []RunRequest {
+func (f *fakeRunner) calls() []client.RunRequest {
 	f.reqsMu.Lock()
 	defer f.reqsMu.Unlock()
-	out := make([]RunRequest, len(f.reqs))
+	out := make([]client.RunRequest, len(f.reqs))
 	copy(out, f.reqs)
 	return out
 }
@@ -61,13 +62,13 @@ func (f *fakeRunner) calls() []RunRequest {
 func TestExecuteBlocks(t *testing.T) {
 	t.Run("zero cmds returns nil", func(t *testing.T) {
 		runner := &fakeRunner{}
-		results := ExecuteBlocks(context.Background(), ExecConfig{Runner: runner}, nil)
+		results := ExecuteBlocks(context.Background(), ExecConfig{runner: runner}, nil)
 		assert.Nil(t, results)
 	})
 
 	t.Run("one cmd", func(t *testing.T) {
 		runner := &fakeRunner{}
-		results := ExecuteBlocks(context.Background(), ExecConfig{Runner: runner}, []string{"echo hi"})
+		results := ExecuteBlocks(context.Background(), ExecConfig{runner: runner}, []string{"echo hi"})
 		require.Len(t, results, 1)
 		assert.Equal(t, "echo hi", results[0].Command)
 		assert.Equal(t, "echo hi output", results[0].Stdout)
@@ -78,7 +79,7 @@ func TestExecuteBlocks(t *testing.T) {
 	t.Run("results in input order despite completion order", func(t *testing.T) {
 		runner := &fakeRunner{sleepDur: 50 * time.Millisecond}
 		cmds := []string{"slowest", "medium", "fastest"}
-		results := ExecuteBlocks(context.Background(), ExecConfig{Runner: runner}, cmds)
+		results := ExecuteBlocks(context.Background(), ExecConfig{runner: runner}, cmds)
 		require.Len(t, results, 3)
 		assert.Equal(t, "slowest", results[0].Command)
 		assert.Equal(t, "medium", results[1].Command)
@@ -87,23 +88,23 @@ func TestExecuteBlocks(t *testing.T) {
 
 	t.Run("runner error", func(t *testing.T) {
 		runner := &fakeRunner{err: assert.AnError}
-		results := ExecuteBlocks(context.Background(), ExecConfig{Runner: runner}, []string{"bad"})
+		results := ExecuteBlocks(context.Background(), ExecConfig{runner: runner}, []string{"bad"})
 		require.Len(t, results, 1)
 		assert.Error(t, results[0].Err)
 	})
 
 	t.Run("non-zero exit code captured", func(t *testing.T) {
 		runner := &fakeRunner{exitCode: 42}
-		results := ExecuteBlocks(context.Background(), ExecConfig{Runner: runner}, []string{"false"})
+		results := ExecuteBlocks(context.Background(), ExecConfig{runner: runner}, []string{"false"})
 		require.Len(t, results, 1)
 		assert.Equal(t, 42, results[0].ExitCode)
 	})
 
 	t.Run("AllowedPaths propagated", func(t *testing.T) {
 		runner := &fakeRunner{}
-		paths := []AllowedPath{{Path: "/tmp", ReadOnly: true}}
+		paths := []client.AllowedPath{{Path: "/tmp", ReadOnly: true}}
 		results := ExecuteBlocks(context.Background(), ExecConfig{
-			Runner:       runner,
+			runner:       runner,
 			AllowedPaths: paths,
 		}, []string{"ls"})
 		require.Len(t, results, 1)
@@ -117,7 +118,7 @@ func TestExecuteBlocks(t *testing.T) {
 		for i := range cmds {
 			cmds[i] = "sleep 1"
 		}
-		ExecuteBlocks(context.Background(), ExecConfig{Runner: runner}, cmds)
+		ExecuteBlocks(context.Background(), ExecConfig{runner: runner}, cmds)
 		assert.LessOrEqual(t, runner.MaxConcurrent(), int32(8), "worker pool capped at 8")
 	})
 
@@ -126,7 +127,7 @@ func TestExecuteBlocks(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 		defer cancel()
 		cmds := []string{"slow1", "slow2", "slow3"}
-		results := ExecuteBlocks(ctx, ExecConfig{Runner: runner}, cmds)
+		results := ExecuteBlocks(ctx, ExecConfig{runner: runner}, cmds)
 		require.Len(t, results, 3)
 		for _, r := range results {
 			assert.Error(t, r.Err, "cancelled cmd should have ctx error")
@@ -137,7 +138,7 @@ func TestExecuteBlocks(t *testing.T) {
 		runner := &fakeRunner{sleepDur: 10 * time.Second}
 		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 		before := runtime.NumGoroutine()
-		ExecuteBlocks(ctx, ExecConfig{Runner: runner}, []string{"slow"})
+		ExecuteBlocks(ctx, ExecConfig{runner: runner}, []string{"slow"})
 		cancel()
 		time.Sleep(20 * time.Millisecond)
 		after := runtime.NumGoroutine()
@@ -147,7 +148,7 @@ func TestExecuteBlocks(t *testing.T) {
 	t.Run("TimeoutSec propagated", func(t *testing.T) {
 		runner := &fakeRunner{}
 		ExecuteBlocks(context.Background(), ExecConfig{
-			Runner:     runner,
+			runner:     runner,
 			TimeoutSec: 120,
 		}, []string{"test"})
 		require.Len(t, runner.calls(), 1)
@@ -157,7 +158,7 @@ func TestExecuteBlocks(t *testing.T) {
 	t.Run("Env propagated", func(t *testing.T) {
 		runner := &fakeRunner{}
 		ExecuteBlocks(context.Background(), ExecConfig{
-			Runner: runner,
+			runner: runner,
 			Env:    map[string]string{"KEY": "value"},
 		}, []string{"env_test"})
 		require.Len(t, runner.calls(), 1)
@@ -166,17 +167,9 @@ func TestExecuteBlocks(t *testing.T) {
 
 	t.Run("Stderr preserved end-to-end", func(t *testing.T) {
 		runner := &fakeRunner{stderr: "some error output"}
-		results := ExecuteBlocks(context.Background(), ExecConfig{Runner: runner}, []string{"cmd"})
+		results := ExecuteBlocks(context.Background(), ExecConfig{runner: runner}, []string{"cmd"})
 		require.Len(t, results, 1)
 		assert.Equal(t, "some error output", results[0].Stderr)
 		assert.Equal(t, "cmd", results[0].Command)
-	})
-}
-
-func TestNewTemenosRunner(t *testing.T) {
-	t.Run("empty socket path returns non-nil runner", func(t *testing.T) {
-		runner, err := NewTemenosRunner("")
-		assert.NoError(t, err)
-		assert.NotNil(t, runner)
 	})
 }
