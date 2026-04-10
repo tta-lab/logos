@@ -172,4 +172,21 @@ func TestExecuteBlocks(t *testing.T) {
 		assert.Equal(t, "some error output", results[0].Stderr)
 		assert.Equal(t, "cmd", results[0].Command)
 	})
+
+	t.Run("blocked command returns error", func(t *testing.T) {
+		runner := &fakeRunner{}
+		results := ExecuteBlocks(context.Background(), ExecConfig{runner: runner}, []string{"sed -i 's/x/y/' f.go"})
+		require.Len(t, results, 1)
+		assert.Error(t, results[0].Err)
+		assert.Contains(t, results[0].Err.Error(), "src edit")
+		assert.Empty(t, runner.calls(), "blocked command should not reach runner")
+	})
+
+	t.Run("allowed sed command still executes", func(t *testing.T) {
+		runner := &fakeRunner{}
+		results := ExecuteBlocks(context.Background(), ExecConfig{runner: runner}, []string{"sed -n '/foo/p' file"})
+		require.Len(t, results, 1)
+		assert.NoError(t, results[0].Err)
+		require.Len(t, runner.calls(), 1, "allowed command should reach runner")
+	})
 }

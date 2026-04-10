@@ -138,6 +138,15 @@ func (e *blockExecutor) worker() {
 		default:
 		}
 
+		if directive, ok := handleBlockedCommand(task.cmd); ok {
+			e.resultsCh <- blockResult{
+				index: task.index,
+				cmd:   task.cmd,
+				err:   fmt.Errorf("blocked command %q: %s", task.cmd, directive),
+			}
+			continue
+		}
+
 		req := client.RunRequest{
 			Command:      task.cmd,
 			Env:          e.cfg.Env,

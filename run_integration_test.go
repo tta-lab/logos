@@ -540,3 +540,31 @@ func TestRun_Parallel_TransportError_CallbackNotFired(t *testing.T) {
 	assert.Contains(t, result.Response, "Done.")
 	assert.NotContains(t, callbackCmds, "fail", "transport error should not fire callback")
 }
+
+func TestRun_BlockedCommand_DirectiveFedBack(t *testing.T) {
+	// Model issues sed -i in a <cmd> block — should not reach runner,
+	// directive should appear in the result step fed back to the model.
+	model := &mockLanguageModel{responses: []string{
+		"<cmd>\nsed -i 's/foo/bar/' file.go\n</cmd>",
+		"I'll use src edit instead.",
+	}}
+	runner := &mockCommandRunner{response: client.RunResponse{Stdout: "ok", ExitCode: 0}}
+	var callbackFired bool
+	cbs := Callbacks{
+		OnCommandResult: func(cmd, output string, exitCode int) {
+			callbackFired = true
+		},
+	}
+	result, err := Run(context.Background(), withTestRunner(newCfg(model), runner), nil, "edit file", cbs)
+	require.NoError(t, err)
+	// Runner should NOT have been called
+	assert.Empty(t, runner.calls, "blocked command should not reach runner")
+	// OnCommandResult should NOT fire
+	assert.False(t, callbackFired, "OnCommandResult should not fire for blocked commands")
+	// Directive should appear in the result step
+	require.GreaterOrEqual(t, len(result.Steps), 2)
+	assert.Equal(t, StepRoleResult, result.Steps[1].Role)
+	assert.Contains(t, result.Steps[1].Content, "src edit")
+	// Model should have continued after receiving the directive
+	assert.Contains(t, result.Response, "I'll use src edit instead.")
+}

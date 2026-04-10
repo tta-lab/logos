@@ -289,6 +289,14 @@ func (e *cmdExecutor) worker() {
 		default:
 		}
 
+		if directive, ok := handleBlockedCommand(task.cmd); ok {
+			e.resultsCh <- cmdResult{
+				index:  task.index,
+				output: task.cmd + "\n" + directive,
+			}
+			continue
+		}
+
 		resp, err := e.cfg.runner.Run(e.ctx, client.RunRequest{
 			Command:      task.cmd,
 			Env:          e.cfg.SandboxEnv,
