@@ -141,30 +141,13 @@ func Run(
 		hallucinationCount int
 	)
 
-	for step := 0; step < maxSteps; step++ {
-		onDelta := func(text string) {
-			if cbs.OnDelta != nil {
-				cbs.OnDelta(text)
-			}
-		}
-		fullText, reasoning, reasoningSig, toolCallDetected, cmdResults, streamErr :=
-			streamOneTurn(ctx, model, messages, maxTokens, cfg, cbs, onDelta)
-		if streamErr != nil {
-			// If the stream error is (or wraps) a cancellation, surface it directly
-			// so callers can match with errors.Is(err, context.Canceled).
-			if errors.Is(streamErr, context.Canceled) || errors.Is(streamErr, context.DeadlineExceeded) {
-				return &RunResult{Response: responseText.String(), Steps: steps}, streamErr
-			}
-			return nil, fmt.Errorf("stream turn %d: %w", step, streamErr)
-		}
-		// Defense in depth: even if streamOneTurn returned nil error (e.g. because a
-		// worker exited on cancel without pushing a result), check ctx and bail out
-		// before another LLM round-trip.
-		if err := ctx.Err(); err != nil {
-			return &RunResult{Response: responseText.String(), Steps: steps}, err
-		}
-
-		// Check tool call hallucination BEFORE appending to Steps.
+	// handleTurn processes a single LLM turn and appends results to state.
+	// Returns a non-nil error if the run should abort (cancellation, hallucination
+	// limit, or stream error). A false-ok return means the loop should continue.
+	var handleTurn func(step int, fullText, reasoning, reasoningSig string, toolCallDetected bool,
+		cmdResults []string) (*RunResult, error)
+	handleTurn = func(step int, fullText, reasoning, reasoningSig string, toolCallDetected bool,
+		cmdResults []string) (*RunResult, error) {
 		if toolCallDetected {
 			hallucinationCount++
 			if hallucinationCount > MaxHallucinationRetries {
@@ -175,27 +158,50 @@ func Run(
 			if cbs.OnRetry != nil {
 				cbs.OnRetry("tool_call", step)
 			}
-			// Record both the wrong output and feedback in Steps (for conversation restore).
 			steps = append(steps, newAssistantStep(fullText, reasoning, reasoningSig))
 			steps = append(steps, StepMessage{Role: StepRoleResult, Content: directive, Timestamp: time.Now().UTC()})
-			aMsg := newAssistantMessage(fullText, reasoning, reasoningSig)
-			messages = append(messages, aMsg, fantasy.NewUserMessage(directive))
-			continue
+			messages = append(messages, newAssistantMessage(fullText, reasoning, reasoningSig), fantasy.NewUserMessage(directive))
+			return nil, nil
 		}
 
 		steps = append(steps, newAssistantStep(fullText, reasoning, reasoningSig))
 		responseText.WriteString(fullText)
 
 		if len(cmdResults) == 0 {
-			// Final answer — return
 			return &RunResult{Response: responseText.String(), Steps: steps}, nil
 		}
 
 		userContent := "<result>\n" + strings.Join(cmdResults, "\n") + "\n</result>"
-
 		steps = append(steps, StepMessage{Role: StepRoleResult, Content: userContent, Timestamp: time.Now().UTC()})
-		aMsg2 := newAssistantMessage(fullText, reasoning, reasoningSig)
-		messages = append(messages, aMsg2, fantasy.NewUserMessage(userContent))
+		messages = append(messages, newAssistantMessage(fullText, reasoning, reasoningSig), fantasy.NewUserMessage(userContent))
+		return nil, nil
+	}
+
+	for step := 0; step < maxSteps; step++ {
+		onDelta := func(text string) {
+			if cbs.OnDelta != nil {
+				cbs.OnDelta(text)
+			}
+		}
+		fullText, reasoning, reasoningSig, toolCallDetected, cmdResults, streamErr :=
+			streamOneTurn(ctx, model, messages, maxTokens, cfg, cbs, onDelta)
+		if streamErr != nil {
+			if errors.Is(streamErr, context.Canceled) || errors.Is(streamErr, context.DeadlineExceeded) {
+				return &RunResult{Response: responseText.String(), Steps: steps}, streamErr
+			}
+			return nil, fmt.Errorf("stream turn %d: %w", step, streamErr)
+		}
+		if err := ctx.Err(); err != nil {
+			return &RunResult{Response: responseText.String(), Steps: steps}, err
+		}
+
+		result, err := handleTurn(step, fullText, reasoning, reasoningSig, toolCallDetected, cmdResults)
+		if err != nil {
+			return result, err
+		}
+		if result != nil {
+			return result, nil
+		}
 	}
 
 	return &RunResult{
