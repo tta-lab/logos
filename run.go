@@ -97,6 +97,55 @@ type Callbacks struct {
 	OnRetry func(reason string, step int)
 }
 
+// runLoop holds the mutable state threaded through the agent loop.
+type runLoop struct {
+	messages           []fantasy.Message
+	steps              []StepMessage
+	responseText       strings.Builder
+	hallucinationCount int
+	cbs                Callbacks
+}
+
+// handleTurn processes a single LLM turn and appends results to state.
+// Returns a non-nil error if the run should abort (hallucination limit).
+// Returns a non-nil result when the loop is complete (no more commands).
+func (l *runLoop) handleTurn(
+	step int,
+	fullText, reasoning, reasoningSig string,
+	toolCallDetected bool,
+	cmdResults []string,
+) (*RunResult, error) {
+	if toolCallDetected {
+		l.hallucinationCount++
+		if l.hallucinationCount > MaxHallucinationRetries {
+			return nil, fmt.Errorf("logos: tool call hallucination not resolved after %d retries", MaxHallucinationRetries)
+		}
+		directive := hallucinationDirective(l.hallucinationCount)
+		slog.Warn("tool call hallucination detected", "step", step, "attempt", l.hallucinationCount)
+		if l.cbs.OnRetry != nil {
+			l.cbs.OnRetry("tool_call", step)
+		}
+		assistantMsg := newAssistantMessage(fullText, reasoning, reasoningSig)
+		l.steps = append(l.steps, newAssistantStep(fullText, reasoning, reasoningSig))
+		l.steps = append(l.steps, StepMessage{Role: StepRoleResult, Content: directive, Timestamp: time.Now().UTC()})
+		l.messages = append(l.messages, assistantMsg, fantasy.NewUserMessage(directive))
+		return nil, nil
+	}
+
+	l.steps = append(l.steps, newAssistantStep(fullText, reasoning, reasoningSig))
+	l.responseText.WriteString(fullText)
+
+	if len(cmdResults) == 0 {
+		return &RunResult{Response: l.responseText.String(), Steps: l.steps}, nil
+	}
+
+	userContent := "<result>\n" + strings.Join(cmdResults, "\n") + "\n</result>"
+	assistantMsg := newAssistantMessage(fullText, reasoning, reasoningSig)
+	l.steps = append(l.steps, StepMessage{Role: StepRoleResult, Content: userContent, Timestamp: time.Now().UTC()})
+	l.messages = append(l.messages, assistantMsg, fantasy.NewUserMessage(userContent))
+	return nil, nil
+}
+
 // Run executes the agent loop: prompt → LLM → <cmd> blocks → repeat.
 // Stateless — the caller handles conversation persistence.
 func Run(
@@ -135,46 +184,9 @@ func Run(
 	messages = append(messages, history...)
 	messages = append(messages, fantasy.NewUserMessage(prompt))
 
-	var (
-		steps              []StepMessage
-		responseText       strings.Builder
-		hallucinationCount int
-	)
-
-	// handleTurn processes a single LLM turn and appends results to state.
-	// Returns a non-nil error if the run should abort (cancellation, hallucination
-	// limit, or stream error). A false-ok return means the loop should continue.
-	var handleTurn func(step int, fullText, reasoning, reasoningSig string, toolCallDetected bool,
-		cmdResults []string) (*RunResult, error)
-	handleTurn = func(step int, fullText, reasoning, reasoningSig string, toolCallDetected bool,
-		cmdResults []string) (*RunResult, error) {
-		if toolCallDetected {
-			hallucinationCount++
-			if hallucinationCount > MaxHallucinationRetries {
-				return nil, fmt.Errorf("logos: tool call hallucination not resolved after %d retries", MaxHallucinationRetries)
-			}
-			directive := hallucinationDirective(hallucinationCount)
-			slog.Warn("tool call hallucination detected", "step", step, "attempt", hallucinationCount)
-			if cbs.OnRetry != nil {
-				cbs.OnRetry("tool_call", step)
-			}
-			steps = append(steps, newAssistantStep(fullText, reasoning, reasoningSig))
-			steps = append(steps, StepMessage{Role: StepRoleResult, Content: directive, Timestamp: time.Now().UTC()})
-			messages = append(messages, newAssistantMessage(fullText, reasoning, reasoningSig), fantasy.NewUserMessage(directive))
-			return nil, nil
-		}
-
-		steps = append(steps, newAssistantStep(fullText, reasoning, reasoningSig))
-		responseText.WriteString(fullText)
-
-		if len(cmdResults) == 0 {
-			return &RunResult{Response: responseText.String(), Steps: steps}, nil
-		}
-
-		userContent := "<result>\n" + strings.Join(cmdResults, "\n") + "\n</result>"
-		steps = append(steps, StepMessage{Role: StepRoleResult, Content: userContent, Timestamp: time.Now().UTC()})
-		messages = append(messages, newAssistantMessage(fullText, reasoning, reasoningSig), fantasy.NewUserMessage(userContent))
-		return nil, nil
+	loop := &runLoop{
+		messages: messages,
+		cbs:      cbs,
 	}
 
 	for step := 0; step < maxSteps; step++ {
@@ -184,18 +196,18 @@ func Run(
 			}
 		}
 		fullText, reasoning, reasoningSig, toolCallDetected, cmdResults, streamErr :=
-			streamOneTurn(ctx, model, messages, maxTokens, cfg, cbs, onDelta)
+			streamOneTurn(ctx, model, loop.messages, maxTokens, cfg, cbs, onDelta)
 		if streamErr != nil {
 			if errors.Is(streamErr, context.Canceled) || errors.Is(streamErr, context.DeadlineExceeded) {
-				return &RunResult{Response: responseText.String(), Steps: steps}, streamErr
+				return &RunResult{Response: loop.responseText.String(), Steps: loop.steps}, streamErr
 			}
 			return nil, fmt.Errorf("stream turn %d: %w", step, streamErr)
 		}
 		if err := ctx.Err(); err != nil {
-			return &RunResult{Response: responseText.String(), Steps: steps}, err
+			return &RunResult{Response: loop.responseText.String(), Steps: loop.steps}, err
 		}
 
-		result, err := handleTurn(step, fullText, reasoning, reasoningSig, toolCallDetected, cmdResults)
+		result, err := loop.handleTurn(step, fullText, reasoning, reasoningSig, toolCallDetected, cmdResults)
 		if err != nil {
 			return result, err
 		}
@@ -205,8 +217,8 @@ func Run(
 	}
 
 	return &RunResult{
-		Response: responseText.String(),
-		Steps:    steps,
+		Response: loop.responseText.String(),
+		Steps:    loop.steps,
 	}, fmt.Errorf("logos: max steps (%d) reached", maxSteps)
 }
 
