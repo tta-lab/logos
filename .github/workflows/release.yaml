@@ -1,0 +1,26 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4 # zizmor: ignore[artipacked]
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5 # zizmor: ignore[artipacked,cache-poisoning]
+        with:
+          go-version-file: go.mod
+
+      - name: Test
+        run: make test

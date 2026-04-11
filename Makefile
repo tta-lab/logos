@@ -7,7 +7,7 @@ help:
 	@echo "  make vet           - Run go vet"
 	@echo "  make lint          - Run golangci-lint"
 	@echo "  make tidy          - Tidy go modules"
-	@echo "  make install-hooks - Install qlty pre-commit hooks"
+	@echo "  make install-hooks - Install lefthook git hooks"
 
 test:
 	@echo "Running tests..."
@@ -38,5 +38,5 @@ tidy:
 	@echo "✓ go mod tidy complete"
 
 install-hooks:
-	@qlty githooks install
-	@echo "✓ Qlty hooks installed"
+	@lefthook install
+	@echo "✓ Lefthook hooks installed (pre-commit: gofmt + goimports, pre-push: golangci-lint)"
