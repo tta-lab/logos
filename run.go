@@ -2,6 +2,7 @@ package logos
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -149,7 +150,18 @@ func Run(
 		fullText, reasoning, reasoningSig, toolCallDetected, cmdResults, streamErr :=
 			streamOneTurn(ctx, model, messages, maxTokens, cfg, cbs, onDelta)
 		if streamErr != nil {
+			// If the stream error is (or wraps) a cancellation, surface it directly
+			// so callers can match with errors.Is(err, context.Canceled).
+			if errors.Is(streamErr, context.Canceled) || errors.Is(streamErr, context.DeadlineExceeded) {
+				return &RunResult{Response: responseText.String(), Steps: steps}, streamErr
+			}
 			return nil, fmt.Errorf("stream turn %d: %w", step, streamErr)
+		}
+		// Defense in depth: even if streamOneTurn returned nil error (e.g. because a
+		// worker exited on cancel without pushing a result), check ctx and bail out
+		// before another LLM round-trip.
+		if err := ctx.Err(); err != nil {
+			return &RunResult{Response: responseText.String(), Steps: steps}, err
 		}
 
 		// Check tool call hallucination BEFORE appending to Steps.
@@ -303,6 +315,12 @@ func (e *cmdExecutor) worker() {
 			AllowedPaths: e.cfg.AllowedPaths,
 		})
 		if err != nil {
+			// Cancellation propagates up via the main loop's ctx.Err() check.
+			// Exit the worker without producing a fake cmd result so the LLM is
+			// not re-prompted with a cancellation-as-output.
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return
+			}
 			slog.Error("temenos Run failure", "error", err)
 			e.resultsCh <- cmdResult{
 				index:  task.index,
@@ -344,12 +362,17 @@ type collectedResult struct {
 
 // collectOrderedResults waits for count results and returns them in order.
 // Calls OnCommandResult callback for each result in index order on the main goroutine.
-func collectOrderedResults(resultsCh <-chan cmdResult, count int, cbs Callbacks) []string {
+func collectOrderedResults(ctx context.Context, resultsCh <-chan cmdResult, count int, cbs Callbacks) []string {
 	collected := make([]*collectedResult, count)
 	for i := 0; i < count; i++ {
+		// Exit early on cancellation so the caller (Run) sees ctx.Err() promptly
+		// instead of waiting for results that will never arrive.
+		if err := ctx.Err(); err != nil {
+			return nil
+		}
 		result, ok := <-resultsCh
 		if !ok {
-			break
+			return nil
 		}
 		collected[result.index] = &collectedResult{output: result.output, callback: result.callback}
 	}
@@ -667,7 +690,10 @@ func streamOneTurn(
 	}
 
 	exec.Done()
-	results := collectOrderedResults(resultsCh, int(numCmds.Load()), cbs)
+	results := collectOrderedResults(ctx, resultsCh, int(numCmds.Load()), cbs)
+	if results == nil {
+		return fullText.String(), reasoningBuf.String(), reasoningSig, hallucinationFilter.toolCallDetected, nil, ctx.Err()
+	}
 	return fullText.String(), reasoningBuf.String(), reasoningSig, hallucinationFilter.toolCallDetected, results, nil
 }
 

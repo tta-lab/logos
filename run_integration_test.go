@@ -125,7 +125,7 @@ type slowMockCommandRunner struct {
 	muDelays sync.Mutex
 }
 
-func (m *slowMockCommandRunner) Run(_ context.Context, req client.RunRequest) (*client.RunResponse, error) {
+func (m *slowMockCommandRunner) Run(ctx context.Context, req client.RunRequest) (*client.RunResponse, error) {
 	m.mu.Lock()
 	m.calls = append(m.calls, req)
 	m.mu.Unlock()
@@ -135,7 +135,11 @@ func (m *slowMockCommandRunner) Run(_ context.Context, req client.RunRequest) (*
 	m.muDelays.Unlock()
 
 	if delay > 0 {
-		time.Sleep(delay)
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
 	return &client.RunResponse{Stdout: "ok", ExitCode: 0}, nil
 }
@@ -514,8 +518,9 @@ func TestRun_ContextCancelled_DuringParallelExecution(t *testing.T) {
 	}
 
 	result, err := Run(ctx, withTestRunner(newCfg(model), runner), nil, "go", cbs)
-	require.NoError(t, err, "Run should handle cancellation gracefully")
-	assert.NotEmpty(t, result.Steps, "should have recorded some steps")
+	require.Error(t, err, "Run should return an error when ctx is cancelled")
+	require.ErrorIs(t, err, context.Canceled, "Run must surface context.Canceled")
+	assert.Empty(t, result.Steps, "no steps should be recorded after cancellation")
 }
 
 func TestRun_Parallel_TransportError_CallbackNotFired(t *testing.T) {
@@ -567,4 +572,61 @@ func TestRun_BlockedCommand_DirectiveFedBack(t *testing.T) {
 	assert.Contains(t, result.Steps[1].Content, "src edit")
 	// Model should have continued after receiving the directive
 	assert.Contains(t, result.Response, "I'll use src edit instead.")
+}
+
+// blockingRunner blocks inside Run until ctx is canceled, then returns ctx.Err().
+// started is buffered(1) and signals the test the moment the runner has been entered,
+// removing the need for a time.Sleep race.
+type blockingRunner struct {
+	started chan struct{}
+}
+
+func newBlockingRunner() *blockingRunner {
+	return &blockingRunner{started: make(chan struct{}, 1)}
+}
+
+func (b *blockingRunner) Run(ctx context.Context, _ client.RunRequest) (*client.RunResponse, error) {
+	select {
+	case b.started <- struct{}{}:
+	default:
+	}
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func TestRun_CancelPropagates(t *testing.T) {
+	model := &mockLanguageModel{responses: []string{
+		"I'll run a command.\n<cmd>\nsleep 60\n</cmd>\n",
+	}}
+	runner := newBlockingRunner()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := Run(ctx, withTestRunner(newCfg(model), runner), nil, "do it", Callbacks{})
+		done <- err
+	}()
+
+	// Deterministic sync: wait until the runner has entered Run before we cancel.
+	select {
+	case <-runner.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runner.Run was never entered within 2s — test harness is broken")
+	}
+	cancel()
+
+	select {
+	case err := <-done:
+		require.Error(t, err)
+		require.ErrorIs(t, err, context.Canceled, "Run must surface context.Canceled, got: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return within 2s after cancel — cancellation was swallowed")
+	}
+
+	// No spurious second LLM turn.
+	require.Equal(t, 1, model.call,
+		"mock model should only have been called once — a second call means "+
+			"cancellation was swallowed and the loop continued")
 }
