@@ -553,3 +553,120 @@ func TestRun_MultipleCmdBlocks_SecondIgnored(t *testing.T) {
 	require.Len(t, runner.calls, 1, "only the first cmd block should execute")
 	assert.Equal(t, "ls", runner.calls[0].Command)
 }
+
+// blockingRunner blocks inside Run until ctx is canceled, then returns ctx.Err().
+// started is buffered(1) and signals the test the moment the runner has been entered,
+// removing the need for a time.Sleep race.
+type blockingRunner struct {
+	started chan struct{}
+}
+
+func newBlockingRunner() *blockingRunner {
+	return &blockingRunner{started: make(chan struct{}, 1)}
+}
+
+func (b *blockingRunner) Run(ctx context.Context, _ client.RunRequest) (*client.RunResponse, error) {
+	select {
+	case b.started <- struct{}{}:
+	default:
+	}
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func TestRun_CancelPropagates(t *testing.T) {
+	model := &mockLanguageModel{responses: []string{
+		"I'll run a command.\n<cmd>\nsleep 60\n</cmd>\n",
+	}}
+	runner := newBlockingRunner()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := Run(ctx, withTestRunner(newCfg(model), runner), nil, "do it", Callbacks{})
+		done <- err
+	}()
+
+	// Deterministic sync: wait until the runner has entered Run before we cancel.
+	select {
+	case <-runner.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runner.Run was never entered within 2s — test harness is broken")
+	}
+	cancel()
+
+	select {
+	case err := <-done:
+		require.Error(t, err)
+		require.ErrorIs(t, err, context.Canceled, "Run must surface context.Canceled, got: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return within 2s after cancel — cancellation was swallowed")
+	}
+
+	// No spurious second LLM turn.
+	require.Equal(t, 1, model.call,
+		"mock model should only have been called once — a second call means "+
+			"cancellation was swallowed and the loop continued")
+}
+
+func TestRun_DeadlineExceeded_Propagates(t *testing.T) {
+	model := &mockLanguageModel{responses: []string{
+		"Running command.\n<cmd>\nsleep 60\n</cmd>\n",
+	}}
+	runner := newBlockingRunner()
+
+	// Short deadline — let it fire naturally so ctx.Err() == DeadlineExceeded.
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := Run(ctx, withTestRunner(newCfg(model), runner), nil, "go", Callbacks{})
+		done <- err
+	}()
+
+	// Wait until the runner has started, then let the deadline fire on its own.
+	select {
+	case <-runner.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runner.Run was never entered within 2s — test harness is broken")
+	}
+
+	select {
+	case err := <-done:
+		require.Error(t, err)
+		require.ErrorIs(t, err, context.DeadlineExceeded,
+			"Run must surface context.DeadlineExceeded, got: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return within 2s after deadline — cancellation was swallowed")
+	}
+}
+
+func TestRun_HallucinationRetries_RespectsLimit(t *testing.T) {
+	// Each response contains an XML tool call marker — triggers the hallucination path.
+	hallucinatedResponse := "I will call the tool.\n<tool_call>\n{\"name\": \"bash\", \"arguments\": {}}\n</tool_call>\n"
+	responses := make([]string, MaxHallucinationRetries+1)
+	for i := range responses {
+		responses[i] = hallucinatedResponse
+	}
+	model := &mockLanguageModel{responses: responses}
+
+	var retryCalls []string
+	cbs := Callbacks{
+		OnRetry: func(reason string, step int) {
+			retryCalls = append(retryCalls, reason)
+		},
+	}
+
+	_, err := Run(context.Background(), newCfg(model), nil, "go", cbs)
+
+	require.Error(t, err, "Run should return an error after exhausting hallucination retries")
+	assert.Contains(t, err.Error(), "hallucination")
+	assert.Len(t, retryCalls, MaxHallucinationRetries,
+		"OnRetry should fire exactly MaxHallucinationRetries times")
+	for _, reason := range retryCalls {
+		assert.Equal(t, "tool_call", reason)
+	}
+}

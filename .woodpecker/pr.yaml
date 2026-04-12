@@ -9,13 +9,10 @@ when:
   - event: pull_request
 
 steps:
-  - name: qlty
-    image: alpine:latest
+  - name: lint
+    image: golangci/golangci-lint:v2.11.4
     commands:
-      - apk add --no-cache curl xz
-      - curl -fsSL https://qlty.sh | QLTY_VERSION=0.618.0 sh
-      - export PATH="$HOME/.qlty/bin:$PATH"
-      - qlty check --all --no-progress
+      - golangci-lint run ./...
 
   - name: test
     image: golang:1.26

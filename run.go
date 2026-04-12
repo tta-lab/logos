@@ -2,6 +2,7 @@ package logos
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -147,7 +148,17 @@ func Run(
 		fullText, reasoning, reasoningSig, toolCallDetected, cmdResults, streamErr :=
 			streamOneTurn(ctx, model, messages, maxTokens, cfg, cbs, onDelta)
 		if streamErr != nil {
+			// Surface cancellation directly so callers can errors.Is(err, context.Canceled).
+			if isCancellation(streamErr) {
+				return &RunResult{Response: responseText.String(), Steps: steps}, streamErr
+			}
 			return nil, fmt.Errorf("stream turn %d: %w", step, streamErr)
+		}
+		// Defense in depth: even if streamOneTurn returned nil error (e.g. because a
+		// worker exited on cancel without pushing a result), check ctx and bail out
+		// before another LLM round-trip.
+		if err := ctx.Err(); err != nil {
+			return &RunResult{Response: responseText.String(), Steps: steps}, err
 		}
 
 		// Check tool call hallucination BEFORE appending to Steps.
@@ -222,6 +233,11 @@ func StepsToMessages(steps []StepMessage) []fantasy.Message {
 		}
 	}
 	return msgs
+}
+
+// isCancellation reports whether err is or wraps a context cancellation or deadline.
+func isCancellation(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 // hallucinationDirective returns a directive message for the model after detecting
