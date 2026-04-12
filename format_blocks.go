@@ -6,8 +6,7 @@ import (
 )
 
 // formatOneResult renders a single Result as the per-entry body (without the
-// outer <result> wrap). Exported-package-private — used by FormatResults and
-// by the worker goroutine during streamOneTurn execution.
+// outer <result> wrap). Used by FormatResults and by executeOneCommand.
 func formatOneResult(r Result) string {
 	if r.Err != nil {
 		return r.Command + "\n" + "execution error: " + r.Err.Error()

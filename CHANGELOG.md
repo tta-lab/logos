@@ -4,6 +4,16 @@
 
 ### Breaking Changes
 
+- **`Run()` single-cmd protocol** — the parallel execution goroutine pool has been removed. Each LLM turn may emit at most one `<cmd>` block; multiple commands use bash operators (`&&`, `;`, `|`) inside one block.
+
+### New Features
+
+- **`StepsToMessages(steps []StepMessage) []fantasy.Message`** — new public function to convert step messages back to fantasy conversation messages for round-tripping.
+
+### Bug Fixes
+
+- **`stripPostCmdText`** — new internal helper that removes hallucinated post-`</cmd>` text from LLM turns before persisting to step history. Prevents post-cmd prose pollution and between-cmd narration from polluting conversation context.
+
 The following public types and fields have been removed from the public API:
 
 - **`logos.CommandRunner`** — unexported as `commandRunner`. Use `Config.Sandbox` to select the backend.

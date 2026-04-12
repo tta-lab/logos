@@ -1,9 +1,9 @@
 # logos
 
-Stateless agent loop for Go. LLMs think in plain text and act via `§ ` prefixed shell commands inside `<cmd>` blocks — no tool schemas, no JSON.
+Stateless agent loop for Go. LLMs think in plain text and act via shell commands inside `<cmd>` blocks — no tool schemas, no JSON.
 
 ```
-prompt → LLM → scan <cmd> blocks for "§ command" → execute → feed <result> back → repeat
+prompt → LLM → scan <cmd> blocks → execute → feed <result> back → repeat
 ```
 
 ## Backends
@@ -82,7 +82,7 @@ The LLM responds in plain text. When it wants to act, it wraps commands in a `<c
 Let me check the file structure first.
 
 <cmd>
-§ ls -la /app
+ls -la /app
 </cmd>
 ```
 
@@ -92,7 +92,7 @@ logos detects the commands, executes them in the configured backend, and feeds t
 
 1. **`Run()`** takes config, conversation history, a prompt, and streaming callbacks
 2. Each turn, the LLM streams a response
-3. **`scanAllCommands()`** extracts all `§ ` lines from `<cmd>...</cmd>` blocks
+3. **`ParseCmdBlocks()`** extracts the contents of each `<cmd>` block from an assistant message
 4. Commands run via the configured backend (localRunner or temenos)
 5. Output wrapped in `<result>` becomes the next user message; loop repeats
 6. When the LLM responds with no `<cmd>` blocks, the loop ends and returns `RunResult`
@@ -129,7 +129,7 @@ systemPrompt := base + "\n\n" + customInstructions
 ## Design
 
 - **Stateless** — `Run()` takes history in, returns steps out. The caller owns persistence.
-- **Multi-command blocks** — all `§ ` lines inside a `<cmd>` block run sequentially; bare `§` outside blocks are prose and ignored.
+- **Single-cmd protocol** — each LLM turn emits at most one `<cmd>` block; chain commands with `&&`, `;`, or `|` inside one block.
 - **Dual backend** — sandbox (temenos) or local exec (`/bin/bash`), selected via `Config.Sandbox`.
 - **Provider-agnostic** — uses [fantasy](https://charm.land/fantasy) for LLM abstraction.
 - **Reasoning round-trip** — thinking blocks (Anthropic extended thinking) captured in `StepMessage.Reasoning` and `ReasoningSignature` for conversation restoration.

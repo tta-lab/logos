@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"charm.land/fantasy"
@@ -171,8 +169,12 @@ func Run(
 			continue
 		}
 
-		steps = append(steps, newAssistantStep(fullText, reasoning, reasoningSig))
-		responseText.WriteString(fullText)
+		// Strip hallucinated post-cmd text before persisting.
+		// fullText is written verbatim during streaming; cmdSeen suppressed OnDelta
+		// but fullText still captures raw output. Belt-and-suspenders: strip here.
+		cleanText := stripPostCmdText(fullText)
+		steps = append(steps, newAssistantStep(cleanText, reasoning, reasoningSig))
+		responseText.WriteString(cleanText)
 
 		if len(cmdResults) == 0 {
 			// Final answer — return
@@ -182,7 +184,7 @@ func Run(
 		userContent := "<result>\n" + strings.Join(cmdResults, "\n") + "\n</result>"
 
 		steps = append(steps, StepMessage{Role: StepRoleResult, Content: userContent, Timestamp: time.Now().UTC()})
-		aMsg2 := newAssistantMessage(fullText, reasoning, reasoningSig)
+		aMsg2 := newAssistantMessage(cleanText, reasoning, reasoningSig)
 		messages = append(messages, aMsg2, fantasy.NewUserMessage(userContent))
 	}
 
@@ -190,6 +192,36 @@ func Run(
 		Response: responseText.String(),
 		Steps:    steps,
 	}, fmt.Errorf("logos: max steps (%d) reached", maxSteps)
+}
+
+// stripPostCmdText removes any text the model wrote after the closing </cmd>
+// tag. This text is hallucinated — the model hasn't seen results yet.
+// Uses LastIndex so the outermost </cmd> is used, preserving heredocs.
+func stripPostCmdText(s string) string {
+	if i := strings.LastIndex(s, CmdBlockClose); i >= 0 {
+		return s[:i+len(CmdBlockClose)]
+	}
+	return s
+}
+
+// StepsToMessages converts StepMessages back to fantasy.Messages for
+// conversation round-tripping. Assistant steps produce ReasoningPart-first
+// ordering (required by Anthropic). Result steps pass through the
+// pre-formatted <result> envelope as a user message.
+//
+// Used by fn-agent and lenos to rehydrate a conversation history from
+// persisted StepMessages when resuming an agent session.
+func StepsToMessages(steps []StepMessage) []fantasy.Message {
+	var msgs []fantasy.Message
+	for _, s := range steps {
+		switch s.Role {
+		case StepRoleAssistant:
+			msgs = append(msgs, newAssistantMessage(s.Content, s.Reasoning, s.ReasoningSignature))
+		case StepRoleResult:
+			msgs = append(msgs, fantasy.NewUserMessage(s.Content))
+		}
+	}
+	return msgs
 }
 
 // hallucinationDirective returns a directive message for the model after detecting
@@ -203,7 +235,7 @@ func hallucinationDirective(attempt int) string {
 	return fmt.Sprintf("(Unprocessed: tool call format detected again (attempt %d). "+
 		"There is NO tool calling API. The ONLY way to run commands is inside a <cmd> block. "+
 		"Do NOT use XML tags, brackets, or structured format. Example:\n"+
-		"<cmd>\nls -la\n</cmd>\n<cmd>\ncat file.go\n</cmd>)", attempt)
+		"<cmd>\nls -la\n</cmd>)", attempt)
 }
 
 // newAssistantStep builds a StepMessage for an assistant turn, including optional
@@ -217,154 +249,6 @@ func newAssistantStep(content, reasoning, reasoningSig string) StepMessage {
 		ReasoningSignature: reasoningSig,
 		Timestamp:          time.Now().UTC(),
 	}
-}
-
-// cmdResult holds a command execution result with its index for ordering.
-type cmdResult struct {
-	index    int
-	output   string
-	callback *callbackData // nil if no callback needed
-}
-
-type callbackData struct {
-	command  string
-	output   string
-	exitCode int
-}
-
-// cmdExecutor runs commands in parallel via goroutines.
-type cmdExecutor struct {
-	ctx       context.Context
-	cfg       Config
-	cbs       Callbacks
-	cmdCh     chan cmdTask
-	resultsCh chan cmdResult
-	wg        sync.WaitGroup
-}
-
-// cmdTask is a command with its index for ordering.
-type cmdTask struct {
-	index int
-	cmd   string
-}
-
-// newCmdExecutor creates a command executor with the given number of workers.
-func newCmdExecutor(ctx context.Context, cfg Config, cbs Callbacks, n int, resultsCh chan cmdResult) *cmdExecutor {
-	e := &cmdExecutor{
-		ctx:       ctx,
-		cfg:       cfg,
-		cbs:       cbs,
-		cmdCh:     make(chan cmdTask, n),
-		resultsCh: resultsCh,
-	}
-	for i := 0; i < n; i++ {
-		e.wg.Add(1)
-		go e.worker()
-	}
-	return e
-}
-
-// submit sends a command to the executor with its index.
-func (e *cmdExecutor) submit(index int, cmd string) {
-	select {
-	case e.cmdCh <- cmdTask{index: index, cmd: cmd}:
-	case <-e.ctx.Done():
-	}
-}
-
-// Done waits for all workers to finish and closes the results channel.
-func (e *cmdExecutor) Done() {
-	close(e.cmdCh)
-	e.wg.Wait()
-	close(e.resultsCh)
-}
-
-// worker runs a command execution goroutine.
-func (e *cmdExecutor) worker() {
-	defer e.wg.Done()
-	for task := range e.cmdCh {
-		select {
-		case <-e.ctx.Done():
-			return
-		default:
-		}
-
-		if directive, ok := handleBlockedCommand(task.cmd); ok {
-			e.resultsCh <- cmdResult{
-				index:  task.index,
-				output: task.cmd + "\n" + directive,
-			}
-			continue
-		}
-
-		resp, err := e.cfg.runner.Run(e.ctx, client.RunRequest{
-			Command:      task.cmd,
-			Env:          e.cfg.SandboxEnv,
-			AllowedPaths: e.cfg.AllowedPaths,
-		})
-		if err != nil {
-			slog.Error("temenos Run failure", "error", err)
-			e.resultsCh <- cmdResult{
-				index:  task.index,
-				output: formatOneResult(Result{Command: task.cmd, Err: err}),
-			}
-			continue
-		}
-
-		output := resp.Stdout
-		if resp.Stderr != "" {
-			output += "\nSTDERR:\n" + resp.Stderr
-		}
-		if output == "" {
-			output = "(no output)"
-		}
-
-		var cb *callbackData
-		if e.cbs.OnCommandResult != nil {
-			cb = &callbackData{command: task.cmd, output: output, exitCode: resp.ExitCode}
-		}
-		e.resultsCh <- cmdResult{
-			index: task.index,
-			output: formatOneResult(Result{
-				Command:  task.cmd,
-				Stdout:   resp.Stdout,
-				Stderr:   resp.Stderr,
-				ExitCode: resp.ExitCode,
-			}),
-			callback: cb,
-		}
-	}
-}
-
-// collectedResult holds a result and its callback data for ordered emission.
-type collectedResult struct {
-	output   string
-	callback *callbackData
-}
-
-// collectOrderedResults waits for count results and returns them in order.
-// Calls OnCommandResult callback for each result in index order on the main goroutine.
-func collectOrderedResults(resultsCh <-chan cmdResult, count int, cbs Callbacks) []string {
-	collected := make([]*collectedResult, count)
-	for i := 0; i < count; i++ {
-		result, ok := <-resultsCh
-		if !ok {
-			break
-		}
-		collected[result.index] = &collectedResult{output: result.output, callback: result.callback}
-	}
-	// Fire callbacks and build output in index order.
-	outputs := make([]string, count)
-	for i := 0; i < count; i++ {
-		if collected[i] != nil {
-			outputs[i] = collected[i].output
-			if collected[i].callback != nil && cbs.OnCommandResult != nil {
-				cb := collected[i].callback
-				cbs.OnCommandResult(cb.command, cb.output, cb.exitCode)
-			}
-		}
-	}
-	return outputs
 }
 
 // proseFilter filters hallucinated tool_call patterns from streaming output.
@@ -529,11 +413,11 @@ func (f *cmdBlockBuffer) flushPartial(delta string) (string, bool) {
 }
 
 func (f *cmdBlockBuffer) emitBlock(block string) {
-	if f.exec != nil {
-		f.exec(block)
-	}
 	if f.proseDelegate != nil {
 		f.proseDelegate(block)
+	}
+	if f.exec != nil {
+		f.exec(block)
 	}
 }
 
@@ -616,31 +500,35 @@ func streamOneTurn(
 		return "", "", "", false, nil, streamErr
 	}
 
-	// Parallel execution: resultsCh collects cmd results in order.
-	// workers capped at 8; numCmds determined by atomic counter as cmds arrive.
-	numCmds := atomic.Int64{}
-	resultsCh := make(chan cmdResult, 10)
-	workers := 8
-
-	exec := newCmdExecutor(ctx, cfg, cbs, workers, resultsCh)
-
 	// Chain: hallucinationFilter → cmdBlockBuffer → onDelta
 	// - hallucinationFilter catches tool_call hallucination
-	// - cmdBlockBuffer routes prose to onDelta and complete blocks to exec
+	// - cmdBlockBuffer routes clean prose to onDelta and complete blocks to exec
 	hallucinationFilter := &proseFilter{delegate: func(s string) { onDelta(s) }}
+
+	var (
+		fullText     strings.Builder
+		reasoningBuf strings.Builder
+		pendingCmd   string // at most one cmd
+		cmdSeen      bool   // suppress post-</cmd> text from onDelta
+	)
+
 	cmdFilter := &cmdBlockBuffer{
-		proseDelegate: hallucinationFilter.Write,
+		proseDelegate: func(s string) {
+			if cmdSeen {
+				return
+			}
+			hallucinationFilter.Write(s)
+		},
 		exec: func(block string) {
 			cmd := extractCmdFromBlock(block)
-			idx := int(numCmds.Add(1) - 1)
-			exec.submit(idx, cmd)
+			if pendingCmd == "" {
+				pendingCmd = cmd
+			}
+			cmdSeen = true
 		},
 	}
 	// Order matters: cmdFilter.Flush() must run BEFORE hallucinationFilter.Flush().
 	defer func() { cmdFilter.Flush(); hallucinationFilter.Flush() }()
-
-	var fullText strings.Builder
-	var reasoningBuf strings.Builder
 
 	for part := range stream {
 		switch part.Type {
@@ -666,9 +554,66 @@ func streamOneTurn(
 		}
 	}
 
-	exec.Done()
-	results := collectOrderedResults(resultsCh, int(numCmds.Load()), cbs)
-	return fullText.String(), reasoningBuf.String(), reasoningSig, hallucinationFilter.toolCallDetected, results, nil
+	// Execute single command (no goroutine pool).
+	if pendingCmd == "" {
+		return fullText.String(), reasoningBuf.String(), reasoningSig,
+			hallucinationFilter.toolCallDetected, nil, nil
+	}
+
+	return executeOneCommand(ctx, cfg, cbs, pendingCmd,
+		fullText.String(), reasoningBuf.String(), reasoningSig, hallucinationFilter.toolCallDetected)
+}
+
+// executeOneCommand runs a single command and returns results.
+// Extracted from streamOneTurn to reduce cyclomatic complexity.
+//
+//nolint:unparam
+func executeOneCommand(
+	ctx context.Context,
+	cfg Config,
+	cbs Callbacks,
+	pendingCmd string,
+	fullText string,
+	reasoningBuf string,
+	reasoningSig string,
+	hallucinated bool,
+) (string, string, string, bool, []string, error) {
+	if directive, ok := handleBlockedCommand(pendingCmd); ok {
+		return fullText, reasoningBuf, reasoningSig, hallucinated,
+			[]string{pendingCmd + "\n" + directive}, nil
+	}
+
+	resp, err := cfg.runner.Run(ctx, client.RunRequest{
+		Command:      pendingCmd,
+		Env:          cfg.SandboxEnv,
+		AllowedPaths: cfg.AllowedPaths,
+	})
+	if err != nil {
+		slog.Error("temenos Run failure", "error", err)
+		result := formatOneResult(Result{Command: pendingCmd, Err: err})
+		return fullText, reasoningBuf, reasoningSig, hallucinated, []string{result}, nil
+	}
+
+	output := resp.Stdout
+	if resp.Stderr != "" {
+		output += "\nSTDERR:\n" + resp.Stderr
+	}
+	if output == "" {
+		output = "(no output)"
+	}
+
+	if cbs.OnCommandResult != nil {
+		cbs.OnCommandResult(pendingCmd, output, resp.ExitCode)
+	}
+
+	result := formatOneResult(Result{
+		Command:  pendingCmd,
+		Stdout:   resp.Stdout,
+		Stderr:   resp.Stderr,
+		ExitCode: resp.ExitCode,
+	})
+
+	return fullText, reasoningBuf, reasoningSig, hallucinated, []string{result}, nil
 }
 
 // extractCmdFromBlock extracts the command content from a <cmd>...</cmd> block.

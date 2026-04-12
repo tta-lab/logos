@@ -44,7 +44,7 @@ This is a single-package library (`package logos`). All source is at the root.
 ## Design principles
 
 - **Stateless**: `Run()` takes history in, returns steps out. The caller owns persistence.
-- **Multi-command blocks**: `scanAllCommands` extracts all `§ ` lines from `<cmd>...</cmd>` blocks; bare `§` outside blocks are prose and ignored.
+- **Single-cmd protocol**: each LLM turn may emit at most one `<cmd>` block; multiple commands use bash operators (`&&`, `;`, `|`) inside one block.
 - **Dual backend**: `Config.Sandbox` selects `localRunner` (false) or temenos client (true). `resolveRunner` handles the selection.
 - **Internal runner surface**: `commandRunner`, `localRunner`, `newClient`, `resolveRunner` are all unexported. The only public entry points are `Run()` and `ExecuteBlocks()` + `NewExecConfig()`.
 

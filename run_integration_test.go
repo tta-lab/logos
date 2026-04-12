@@ -117,29 +117,6 @@ func withTestRunner(cfg Config, r commandRunner) Config {
 	return cfg
 }
 
-// slowMockCommandRunner simulates variable command durations for testing parallel execution ordering.
-type slowMockCommandRunner struct {
-	mu       sync.Mutex
-	calls    []client.RunRequest
-	delays   map[string]time.Duration // command -> delay
-	muDelays sync.Mutex
-}
-
-func (m *slowMockCommandRunner) Run(_ context.Context, req client.RunRequest) (*client.RunResponse, error) {
-	m.mu.Lock()
-	m.calls = append(m.calls, req)
-	m.mu.Unlock()
-
-	m.muDelays.Lock()
-	delay := m.delays[req.Command]
-	m.muDelays.Unlock()
-
-	if delay > 0 {
-		time.Sleep(delay)
-	}
-	return &client.RunResponse{Stdout: "ok", ExitCode: 0}, nil
-}
-
 // mockLanguageModelWithReasoning emits a reasoning block followed by text.
 type mockLanguageModelWithReasoning struct {
 	reasoning string
@@ -264,7 +241,9 @@ func TestRun_StreamingTextArrives(t *testing.T) {
 	assert.Contains(t, combined, "done")
 }
 
-func TestRun_CallbackFiresPerCommand(t *testing.T) {
+func TestRun_TwoCommands_SequentialTurns(t *testing.T) {
+	// Single-cmd protocol: each turn emits at most one <cmd> block.
+	// Model sends commands across two separate turns.
 	model := &mockLanguageModel{responses: []string{
 		"<cmd>\nls\n</cmd>",
 		"<cmd>\npwd\n</cmd>",
@@ -295,73 +274,6 @@ func TestRun_CallbackFiresOnLastCommand(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"ls"}, results)
 	assert.Contains(t, result.Response, "final answer")
-}
-
-func TestRun_MultiCommand_ExecutesAll(t *testing.T) {
-	model := &mockLanguageModel{responses: []string{
-		"Let me check.\n<cmd>\npwd\n</cmd>\n<cmd>\nls -la\n</cmd>",
-		"Found the files.",
-	}}
-	runner := &mockCommandRunner{response: client.RunResponse{Stdout: "ok", ExitCode: 0}}
-	var resultCmds []string
-	cbs := Callbacks{
-		OnCommandResult: func(cmd string, output string, exitCode int) { resultCmds = append(resultCmds, cmd) },
-	}
-	result, err := Run(context.Background(), withTestRunner(newCfg(model), runner), nil, "check", cbs)
-	require.NoError(t, err)
-	assert.Contains(t, result.Response, "Found the files.")
-	require.Len(t, runner.calls, 2)
-	assert.Equal(t, "pwd", runner.calls[0].Command)
-	assert.Equal(t, "ls -la", runner.calls[1].Command)
-	assert.Equal(t, []string{"pwd", "ls -la"}, resultCmds)
-}
-
-func TestRun_MultiCommand_ExitCodeFormatted(t *testing.T) {
-	model := &mockLanguageModel{responses: []string{
-		"<cmd>\nfalse\n</cmd>\n<cmd>\necho ok\n</cmd>",
-		"Got it.",
-	}}
-	runner := &mockCommandRunner{response: client.RunResponse{Stderr: "error", ExitCode: 1}}
-	result, err := Run(context.Background(), withTestRunner(newCfg(model), runner), nil, "run", Callbacks{})
-	require.NoError(t, err)
-	cmdStep := result.Steps[1]
-	assert.Equal(t, StepRoleResult, cmdStep.Role)
-	assert.Contains(t, cmdStep.Content, "(exit code: 1)")
-}
-
-func TestRun_MultiCommand_WithHeredoc(t *testing.T) {
-	model := &mockLanguageModel{responses: []string{
-		"<cmd>\ncat <<'EOF'\nhello\nEOF\n</cmd>\n<cmd>\nls -la\n</cmd>",
-		"Done.",
-	}}
-	runner := &mockCommandRunner{response: client.RunResponse{Stdout: "ok", ExitCode: 0}}
-	result, err := Run(context.Background(), withTestRunner(newCfg(model), runner), nil, "go", Callbacks{})
-	require.NoError(t, err)
-	assert.Contains(t, result.Response, "Done.")
-	require.Len(t, runner.calls, 2)
-	assert.Equal(t, "cat <<'EOF'\nhello\nEOF", runner.calls[0].Command)
-	assert.Equal(t, "ls -la", runner.calls[1].Command)
-}
-
-func TestRun_ConsecutiveCommands_NoWarningInjected(t *testing.T) {
-	responses := []string{
-		"<cmd>\necho 1\n</cmd>", "<cmd>\necho 2\n</cmd>", "<cmd>\necho 3\n</cmd>",
-		"<cmd>\necho 4\n</cmd>", "<cmd>\necho 5\n</cmd>",
-		"Halfway.",
-		"<cmd>\necho 6\n</cmd>", "<cmd>\necho 7\n</cmd>", "<cmd>\necho 8\n</cmd>",
-		"<cmd>\necho 9\n</cmd>", "<cmd>\necho 10\n</cmd>",
-		"Done.",
-	}
-	model := &mockLanguageModel{responses: responses}
-	runner := &mockCommandRunner{response: client.RunResponse{Stdout: "ok", ExitCode: 0}}
-	result, err := Run(context.Background(), withTestRunner(newCfg(model), runner), nil, "go", Callbacks{})
-	require.NoError(t, err)
-	for _, s := range result.Steps {
-		if s.Role == StepRoleResult {
-			assert.NotContains(t, s.Content, "without explaining",
-				"no soft warning should be injected")
-		}
-	}
 }
 
 func TestRun_HeredocCommand_FullBlockSentToRunner(t *testing.T) {
@@ -461,86 +373,6 @@ func TestRun_ReasoningCaptured_WithCommand(t *testing.T) {
 	assert.Equal(t, StepRoleResult, result.Steps[1].Role)
 }
 
-func TestRun_ParallelExecution_CallbacksInOrder(t *testing.T) {
-	model := &mockLanguageModel{responses: []string{
-		"<cmd>\nslow\n</cmd>\n<cmd>\nfast\n</cmd>",
-		"Done.",
-	}}
-	runner := &slowMockCommandRunner{
-		delays: map[string]time.Duration{
-			"slow": 50 * time.Millisecond,
-			"fast": 5 * time.Millisecond,
-		},
-	}
-
-	var callbackOrder []string
-	cbs := Callbacks{
-		OnCommandResult: func(cmd string, _ string, _ int) {
-			callbackOrder = append(callbackOrder, cmd)
-		},
-	}
-
-	result, err := Run(context.Background(), withTestRunner(newCfg(model), runner), nil, "go", cbs)
-	require.NoError(t, err)
-	assert.Contains(t, result.Response, "Done.")
-	require.Len(t, callbackOrder, 2)
-	assert.Equal(t, []string{"slow", "fast"}, callbackOrder,
-		"callbacks should fire in command order, not completion order")
-}
-
-func TestRun_ContextCancelled_DuringParallelExecution(t *testing.T) {
-	model := &mockLanguageModel{responses: []string{
-		"<cmd>\ncmd1\n</cmd>\n<cmd>\ncmd2\n</cmd>",
-		"Done.",
-	}}
-
-	cancelled := false
-	runner := &slowMockCommandRunner{
-		delays: map[string]time.Duration{
-			"cmd1": 100 * time.Millisecond,
-			"cmd2": 200 * time.Millisecond,
-		},
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-
-	cbs := Callbacks{
-		OnCommandResult: func(_ string, _ string, _ int) {
-			if !cancelled {
-				cancel()
-				cancelled = true
-			}
-		},
-	}
-
-	result, err := Run(ctx, withTestRunner(newCfg(model), runner), nil, "go", cbs)
-	require.NoError(t, err, "Run should handle cancellation gracefully")
-	assert.NotEmpty(t, result.Steps, "should have recorded some steps")
-}
-
-func TestRun_Parallel_TransportError_CallbackNotFired(t *testing.T) {
-	model := &mockLanguageModel{responses: []string{
-		"<cmd>\nok1\n</cmd>\n<cmd>\nfail\n</cmd>\n<cmd>\nok2\n</cmd>",
-		"Done.",
-	}}
-	runner := &mockCommandRunner{
-		response: client.RunResponse{Stdout: "ok", ExitCode: 0},
-		err:      fmt.Errorf("socket closed"),
-	}
-
-	var callbackCmds []string
-	cbs := Callbacks{
-		OnCommandResult: func(cmd string, _ string, _ int) {
-			callbackCmds = append(callbackCmds, cmd)
-		},
-	}
-
-	result, err := Run(context.Background(), withTestRunner(newCfg(model), runner), nil, "go", cbs)
-	require.NoError(t, err)
-	assert.Contains(t, result.Response, "Done.")
-	assert.NotContains(t, callbackCmds, "fail", "transport error should not fire callback")
-}
-
 func TestRun_BlockedCommand_DirectiveFedBack(t *testing.T) {
 	// Model issues sed -i in a <cmd> block — should not reach runner,
 	// directive should appear in the result step fed back to the model.
@@ -567,4 +399,157 @@ func TestRun_BlockedCommand_DirectiveFedBack(t *testing.T) {
 	assert.Contains(t, result.Steps[1].Content, "src edit")
 	// Model should have continued after receiving the directive
 	assert.Contains(t, result.Response, "I'll use src edit instead.")
+}
+
+func TestRun_ExitCodeFormatted(t *testing.T) {
+	model := &mockLanguageModel{responses: []string{
+		"<cmd>\nfalse\n</cmd>",
+		"Got it.",
+	}}
+	runner := &mockCommandRunner{response: client.RunResponse{Stderr: "error", ExitCode: 1}}
+	result, err := Run(context.Background(), withTestRunner(newCfg(model), runner), nil, "run", Callbacks{})
+	require.NoError(t, err)
+	cmdStep := result.Steps[1]
+	assert.Equal(t, StepRoleResult, cmdStep.Role)
+	assert.Contains(t, cmdStep.Content, "(exit code: 1)")
+}
+
+// --- stripPostCmdText tests ---
+
+func TestStripPostCmdText_PureSpeech(t *testing.T) {
+	input := "Done. Here's what I found."
+	assert.Equal(t, input, stripPostCmdText(input))
+}
+
+func TestStripPostCmdText_PreamblePlusCmd(t *testing.T) {
+	input := "Let me check.\n<cmd>\nls\n</cmd>"
+	assert.Equal(t, input, stripPostCmdText(input))
+}
+
+func TestStripPostCmdText_PreambleCmdPostProse(t *testing.T) {
+	input := "Checking.\n<cmd>\nls\n</cmd>\nfile.go"
+	expected := "Checking.\n<cmd>\nls\n</cmd>"
+	assert.Equal(t, expected, stripPostCmdText(input))
+}
+
+func TestStripPostCmdText_TwoCmdsBetweenProse(t *testing.T) {
+	input := "Running both.\n<cmd>\na\n</cmd>\nfound a\n<cmd>\nb\n</cmd>"
+	// LastIndex: keep everything up to and including the last </cmd>.
+	expected := "Running both.\n<cmd>\na\n</cmd>\nfound a\n<cmd>\nb\n</cmd>"
+	assert.Equal(t, expected, stripPostCmdText(input))
+}
+
+func TestStripPostCmdText_CmdBetweenPost(t *testing.T) {
+	input := "A.\n<cmd>\nx\n</cmd>\nb\n<cmd>\ny\n</cmd>\nz"
+	// LastIndex: keep everything up to the last </cmd>, preserving everything before.
+	expected := "A.\n<cmd>\nx\n</cmd>\nb\n<cmd>\ny\n</cmd>"
+	assert.Equal(t, expected, stripPostCmdText(input))
+}
+
+func TestStripPostCmdText_UnclosedCmd(t *testing.T) {
+	// No </cmd> found — LastIndex returns -1, input returned unchanged.
+	input := "text\n<cmd>\nls"
+	assert.Equal(t, input, stripPostCmdText(input))
+}
+
+func TestStripPostCmdText_EmptyInput(t *testing.T) {
+	assert.Equal(t, "", stripPostCmdText(""))
+}
+
+func TestStripPostCmdText_LeadingCmdNoPreamble(t *testing.T) {
+	input := "<cmd>\nls\n</cmd>"
+	assert.Equal(t, input, stripPostCmdText(input))
+}
+
+func TestStripPostCmdText_NestedCmdInHeredoc(t *testing.T) {
+	// LastIndex ensures the outermost </cmd> is used.
+	input := "<cmd>\ncat <<'EOF'\n</cmd>\nhello\nEOF\n</cmd>\npost"
+	expected := "<cmd>\ncat <<'EOF'\n</cmd>\nhello\nEOF\n</cmd>"
+	assert.Equal(t, expected, stripPostCmdText(input))
+}
+
+// --- StepsToMessages tests ---
+
+func TestStepsToMessages_AssistantWithReasoning(t *testing.T) {
+	steps := []StepMessage{
+		{
+			Role:               StepRoleAssistant,
+			Content:            "I'll check.",
+			Reasoning:          "Let me think...",
+			ReasoningSignature: "sig123",
+			Timestamp:          time.Now().UTC(),
+		},
+	}
+	msgs := StepsToMessages(steps)
+	require.Len(t, msgs, 1)
+	assert.Equal(t, fantasy.MessageRoleAssistant, msgs[0].Role)
+	// ReasoningPart-first ordering: reasoning comes before text.
+	parts := msgs[0].Content
+	require.GreaterOrEqual(t, len(parts), 2)
+	assert.Equal(t, fantasy.ContentTypeReasoning, parts[0].GetType())
+}
+
+func TestStepsToMessages_AssistantThenResult(t *testing.T) {
+	steps := []StepMessage{
+		{
+			Role:               StepRoleAssistant,
+			Content:            "<cmd>\nls\n</cmd>",
+			Reasoning:          "",
+			ReasoningSignature: "",
+			Timestamp:          time.Now().UTC(),
+		},
+		{
+			Role:      StepRoleResult,
+			Content:   "<result>\nls\nok\n</result>",
+			Timestamp: time.Now().UTC(),
+		},
+	}
+	msgs := StepsToMessages(steps)
+	require.Len(t, msgs, 2)
+	assert.Equal(t, fantasy.MessageRoleAssistant, msgs[0].Role)
+	assert.Equal(t, fantasy.MessageRoleUser, msgs[1].Role)
+}
+
+func TestStepsToMessages_Mixed(t *testing.T) {
+	steps := []StepMessage{
+		{
+			Role:               StepRoleAssistant,
+			Content:            "I'll check.",
+			Reasoning:          "thinking...",
+			ReasoningSignature: "sigX",
+			Timestamp:          time.Now().UTC(),
+		},
+		{
+			Role:      StepRoleResult,
+			Content:   "<result>\nls\nfile.go\n</result>",
+			Timestamp: time.Now().UTC(),
+		},
+		{
+			Role:               StepRoleAssistant,
+			Content:            "Found it.",
+			Reasoning:          "",
+			ReasoningSignature: "",
+			Timestamp:          time.Now().UTC(),
+		},
+	}
+	msgs := StepsToMessages(steps)
+	require.Len(t, msgs, 3)
+	assert.Equal(t, fantasy.MessageRoleAssistant, msgs[0].Role)
+	assert.Equal(t, fantasy.MessageRoleUser, msgs[1].Role)
+	assert.Equal(t, fantasy.MessageRoleAssistant, msgs[2].Role)
+}
+
+// TestRun_MultipleCmdBlocks_SecondIgnored verifies the single-cmd protocol:
+// when the model emits multiple <cmd> blocks in one turn, only the first is
+// executed and subsequent blocks are silently ignored.
+func TestRun_MultipleCmdBlocks_SecondIgnored(t *testing.T) {
+	model := &mockLanguageModel{responses: []string{
+		"<cmd>\nls\n</cmd>\n<cmd>\npwd\n</cmd>",
+		"Done.",
+	}}
+	runner := &mockCommandRunner{response: client.RunResponse{Stdout: "ok", ExitCode: 0}}
+	_, err := Run(context.Background(), withTestRunner(newCfg(model), runner), nil, "go", Callbacks{})
+	require.NoError(t, err)
+	require.Len(t, runner.calls, 1, "only the first cmd block should execute")
+	assert.Equal(t, "ls", runner.calls[0].Command)
 }
