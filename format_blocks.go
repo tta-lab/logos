@@ -9,7 +9,7 @@ import (
 // outer <result> wrap). Used by FormatResults and by executeOneCommand.
 func formatOneResult(r Result) string {
 	if r.Err != nil {
-		return r.Command + "\n" + "execution error: " + r.Err.Error()
+		return "execution error: " + r.Err.Error()
 	}
 	output := r.Stdout
 	if r.Stderr != "" {
@@ -18,11 +18,10 @@ func formatOneResult(r Result) string {
 	if output == "" {
 		output = "(no output)"
 	}
-	formatted := r.Command + "\n" + output
 	if r.ExitCode != 0 && r.ExitCode != -1 {
-		formatted += fmt.Sprintf("\n(exit code: %d)", r.ExitCode)
+		output += fmt.Sprintf("\n(exit code: %d)", r.ExitCode)
 	}
-	return formatted
+	return output
 }
 
 // FormatResults renders a slice of Results as the single outer <result>...</result>
@@ -30,13 +29,12 @@ func formatOneResult(r Result) string {
 // Format matches what streamOneTurn produces internally:
 //
 //	<result>
-//	<cmd-1-verbatim>
 //	<stdout-1>
 //	STDERR:                        ← only if stderr non-empty
 //	<stderr-1>
 //	(exit code: N)                 ← only if exit != 0 AND exit != -1
 //
-//	<cmd-2-verbatim>
+//	<stdout-2>
 //	...
 //	</result>
 //

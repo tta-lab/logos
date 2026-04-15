@@ -521,7 +521,7 @@ func TestStepsToMessages_AssistantThenResult(t *testing.T) {
 		},
 		{
 			Role:      StepRoleResult,
-			Content:   "<result>\nls\nok\n</result>",
+			Content:   "<result>\nok\n</result>",
 			Timestamp: time.Now().UTC(),
 		},
 	}
@@ -542,7 +542,7 @@ func TestStepsToMessages_Mixed(t *testing.T) {
 		},
 		{
 			Role:      StepRoleResult,
-			Content:   "<result>\nls\nfile.go\n</result>",
+			Content:   "<result>\nfile.go\n</result>",
 			Timestamp: time.Now().UTC(),
 		},
 		{

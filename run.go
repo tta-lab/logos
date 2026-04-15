@@ -676,7 +676,7 @@ func executeOneCommand(
 			cbs.OnCommandResult(pendingCmd, directive, -2)
 		}
 		return fullText, reasoningBuf, reasoningSig, hallucinated,
-			[]string{pendingCmd + "\n" + directive}, nil
+			[]string{directive}, nil
 	}
 
 	resp, err := cfg.runner.Run(ctx, client.RunRequest{
