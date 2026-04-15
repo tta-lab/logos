@@ -1,4 +1,4 @@
-module github.com/tta-lab/logos
+module github.com/tta-lab/logos/v2
 
 go 1.26.1
 
