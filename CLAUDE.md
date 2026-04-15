@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What is logos
 
-logos is a Go library that implements a stateless agent loop. LLMs think in plain text and act via `§ ` prefixed shell commands inside `<cmd>` blocks — no tool schemas, no JSON. The loop is: prompt → LLM → scan for `<cmd>` block with `§ command` → execute in sandbox → feed `<result>` back → repeat.
+logos is a Go library that implements a stateless agent loop. LLMs think in plain text and act via shell commands inside `<cmd>` blocks — no tool schemas, no JSON. The loop is: prompt → LLM → scan `<cmd>` blocks → execute in sandbox → feed `<result>` back → repeat.
 
 ## Key dependencies
 
@@ -32,13 +32,12 @@ Pre-commit hooks (lefthook): fmt check, vet, lint — run in parallel.
 
 This is a single-package library (`package logos`). All source is at the root.
 
-- **run.go** — Core `Run()` function: the agent loop. Takes `Config` (provider, model, Sandbox, SandboxAddr, sandbox env), conversation history, a prompt, and `Callbacks` (streaming hooks: `OnDelta`, `OnReasoningDelta`, `OnReasoningSignature`, `OnCommandResult`, `OnTurnStart`, `OnTurnEnd`, `OnRetry`). Returns `RunResult` with accumulated response text and step messages. Internally uses `resolveRunner` to select either `localRunner` (unsandboxed `/bin/bash`) or temenos client, then executes commands via `commandRunner` interface.
+- **run.go** — Core `Run()` function: the agent loop. Takes `Config` (provider, model, Sandbox, SandboxAddr, sandbox env), conversation history, a prompt, and `Callbacks`. Vocabulary: Step = one iteration (one model call + optional cmd execution); multiple Steps per Turn. One Turn = one `Run()` call. Callbacks: per-step hooks `OnStepStart`, `OnStepEnd`, `OnDelta`, `OnReasoningDelta`, `OnReasoningSignature`, `OnCommandResult`; per-turn terminal hook `OnTurnEnd(reason StopReason)`. Returns `RunResult` with accumulated response text and step messages. Internally uses `resolveRunner` to select either `localRunner` (unsandboxed `/bin/bash`) or temenos client, then executes commands via `commandRunner` interface.
 - **local_runner.go** — `localRunner`: unsandboxed command execution via `os/exec`. Selected when `Config.Sandbox` is false.
 - **runner_resolve.go** — `resolveRunner`: selects the appropriate `commandRunner` from `Config`.
 - **client.go** — `newClient`: creates a temenos `*client.Client`.
-- **parse.go** — `ParseCommand()`: detects lines starting with `§ ` (after optional whitespace) and extracts the command args.
 - **prompt.go** — `BuildSystemPrompt()`: renders `system.md.tpl` (embedded via `//go:embed`) with runtime context.
-- **system.md.tpl** — Go template for the system prompt. Instructs the LLM to wrap `§ ` commands in `<cmd>...</cmd>` blocks.
+- **system.md.tpl** — Go template for the system prompt. Instructs the LLM to wrap shell commands in `<cmd>...</cmd>` blocks.
 - **exec_blocks.go** — `ExecuteBlocks()` and `NewExecConfig()`: library-mode API for running parsed commands.
 
 ## Design principles

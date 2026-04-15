@@ -73,6 +73,11 @@ result, err := logos.Run(ctx, logos.Config{
     OnDelta: func(text string) {
         fmt.Print(text) // stream to terminal
     },
+    // Step lifecycle — fires for each model call:
+    OnStepStart: func(stepIdx int) { fmt.Printf("step %d start\n", stepIdx) },
+    OnStepEnd:   func(stepIdx int) { fmt.Printf("step %d done\n", stepIdx) },
+    // Per-turn termination — fires exactly once at Run() exit:
+    OnTurnEnd: func(reason logos.StopReason) { fmt.Printf("done: %s\n", reason) },
 })
 ```
 
@@ -104,7 +109,8 @@ logos detects the commands, executes them in the configured backend, and feeds t
 | `Config` | Provider, model, Sandbox/SandboxAddr, sandbox env, allowed paths |
 | `RunResult` | Final response text + all step messages |
 | `StepMessage` | One message in the loop (assistant text, with optional reasoning, or command output) |
-| `Callbacks` | Optional streaming hooks: `OnDelta`, `OnReasoningDelta`, `OnReasoningSignature`, `OnCommandResult`, `OnTurnStart`, `OnTurnEnd`, `OnRetry` |
+| `Callbacks` | Per-step hooks (`OnStepStart`, `OnStepEnd`, `OnDelta`, `OnReasoningDelta`, `OnReasoningSignature`, `OnCommandResult`) plus per-turn hook (`OnTurnEnd` with `StopReason`). One Turn = one `Run()` call; multiple Steps per Turn. |
+| `StopReason` | Why `Run()` terminated: `final` / `canceled` / `error` / `hallucination_limit` / `max_steps` |
 | `ParseCmdBlocks` | Extract `<cmd>` block contents from a complete assistant message |
 | `ExecuteBlocks` | Run parsed commands concurrently, return `[]Result` |
 | `FormatResults` | Render `[]Result` as a `<result>` wrap for the model |

@@ -38,16 +38,17 @@ const CmdBlockOpen = "<cmd>"
 // CmdBlockClose is the closing tag for command blocks: <cmd>...</cmd>.
 const CmdBlockClose = "</cmd>"
 
-// StopReason describes why a turn ended. Used by the OnTurnEnd callback.
+// StopReason describes why a Turn (single Run() invocation) terminated.
+// Used by the OnTurnEnd callback. Each value corresponds to exactly one
+// exit path in Run().
 type StopReason string
 
 const (
-	StopReasonToolUse       StopReason = "tool_use"        // command executed, loop continues
-	StopReasonEndTurn       StopReason = "end_turn"        // final answer, no command
-	StopReasonCanceled      StopReason = "canceled"        // context cancelled
-	StopReasonError         StopReason = "error"           // non-cancellation stream error
-	StopReasonToolCallRetry StopReason = "tool_call_retry" // hallucination detected, retrying
-	StopReasonMaxSteps      StopReason = "max_steps"       // max steps exhausted
+	StopReasonFinal              StopReason = "final"               // model returned final answer (no <cmd>)
+	StopReasonCanceled           StopReason = "canceled"            // ctx canceled (in stream OR after)
+	StopReasonError              StopReason = "error"               // stream error (non-cancellation)
+	StopReasonHallucinationLimit StopReason = "hallucination_limit" // MaxHallucinationRetries exceeded
+	StopReasonMaxSteps           StopReason = "max_steps"           // MaxSteps exhausted
 )
 
 // Re-exported from temenos/client so consumers don't import temenos directly.
@@ -97,41 +98,52 @@ type RunResult struct {
 // Callbacks holds optional streaming callbacks for the agent loop.
 // All fields are nil-safe — unset callbacks are simply not called.
 //
-// Callback firing order within a single turn:
-//  1. OnTurnStart           — before the model call begins
-//  2. OnDelta / OnReasoningDelta — interleaved text / thinking deltas from the stream
-//  3. OnReasoningSignature — once when the reasoning signature is finalised
-//  4. OnCommandResult       — after the command executes (if any command was found)
-//  5. OnTurnEnd             — turn completes; reason is a StopReason constant:
-//     StopReasonToolUse | StopReasonEndTurn | StopReasonCanceled |
-//     StopReasonError | StopReasonToolCallRetry | StopReasonMaxSteps
+// Vocabulary:
+//
+//	Step — one iteration of the loop (one model call + optional cmd execution).
+//	       Multiple steps per Turn.
+//	Turn — one full agent response cycle. Exactly one Turn per Run() call.
+//
+// Firing order within a Turn:
+//  1. OnStepStart(0)
+//  2. OnDelta / OnReasoningDelta — interleaved during streaming
+//  3. OnReasoningSignature       — once when reasoning block finalises
+//  4. OnCommandResult            — if a cmd block executed
+//  5. OnStepEnd(0)
+//     ... (steps repeat 1-5 with stepIdx incrementing)
+//     N. OnTurnEnd(reason) — exactly once at Run() exit
 type Callbacks struct {
+	// OnStepStart fires before each model call. stepIdx is the zero-based step number.
+	OnStepStart func(stepIdx int)
+	// OnStepEnd fires after each step completes. stepIdx is the zero-based step number.
+	OnStepEnd func(stepIdx int)
 	// OnDelta is called with each text delta as the LLM streams its response.
 	OnDelta func(text string)
 	// OnReasoningDelta streams thinking content live as it arrives.
 	OnReasoningDelta func(text string)
-	// OnReasoningSignature fires once per turn when the reasoning block is finalised.
+	// OnReasoningSignature fires once per step when the reasoning block is finalised.
 	OnReasoningSignature func(signature string)
-	// OnCommandResult is called after a command executes with the command string,
-	// raw combined stdout+stderr output (no exit code suffix), and the exit code.
+	// OnCommandResult is called after a command executes (or is blocked/runner errors).
+	// command: the command that was run.
+	// output: formatOneResult output on success; directive text on blocked commands (exitCode=-2);
+	//          formatOneResult output with Err set on runner errors (exitCode=-1).
+	// exitCode: 0 on success, -1 on runner error, -2 on blocked command.
 	OnCommandResult func(command string, output string, exitCode int)
-	// OnRetry is called when a tool call hallucination (XML or bracket) is detected
-	// and an "unprocessed" directive is injected. reason is "tool_call".
-	OnRetry func(reason string, step int)
-	// OnTurnStart fires before each model call. turnIdx is the zero-based turn number.
-	OnTurnStart func(turnIdx int)
-	// OnTurnEnd fires after each turn completes. turnIdx is the zero-based turn number.
-	// reason is a StopReason constant: StopReasonToolUse | StopReasonEndTurn |
-	// StopReasonCanceled | StopReasonError | StopReasonToolCallRetry | StopReasonMaxSteps.
-	// Note: for StopReasonMaxSteps, turnIdx equals max steps (no paired OnTurnStart).
-	OnTurnEnd func(turnIdx int, reason StopReason)
+	// OnTurnEnd fires once when Run() exits. reason is a StopReason constant.
+	OnTurnEnd func(reason StopReason)
+}
+
+// emitStepEnd fires the OnStepEnd callback with the step index, nil-safe.
+func (cbs Callbacks) emitStepEnd(stepIdx int) {
+	if cbs.OnStepEnd != nil {
+		cbs.OnStepEnd(stepIdx)
+	}
 }
 
 // emitTurnEnd fires the OnTurnEnd callback with a stop reason, nil-safe.
-// Extracted to avoid repeating the nil-check at every exit path.
-func (cbs Callbacks) emitTurnEnd(turnIdx int, reason StopReason) {
+func (cbs Callbacks) emitTurnEnd(reason StopReason) {
 	if cbs.OnTurnEnd != nil {
-		cbs.OnTurnEnd(turnIdx, reason)
+		cbs.OnTurnEnd(reason)
 	}
 }
 
@@ -181,10 +193,9 @@ func Run(
 		responseText       strings.Builder
 		hallucinationCount int
 	)
-	var step int
-	for step = 0; step < maxSteps; step++ {
-		if cbs.OnTurnStart != nil {
-			cbs.OnTurnStart(step)
+	for step := 0; step < maxSteps; step++ {
+		if cbs.OnStepStart != nil {
+			cbs.OnStepStart(step)
 		}
 		onDelta := func(text string) {
 			if cbs.OnDelta != nil {
@@ -196,17 +207,20 @@ func Run(
 		if streamErr != nil {
 			// Surface cancellation directly so callers can errors.Is(err, context.Canceled).
 			if isCancellation(streamErr) {
-				cbs.emitTurnEnd(step, StopReasonCanceled)
+				cbs.emitStepEnd(step)
+				cbs.emitTurnEnd(StopReasonCanceled)
 				return &RunResult{Response: responseText.String(), Steps: steps}, streamErr
 			}
-			cbs.emitTurnEnd(step, StopReasonError)
+			cbs.emitStepEnd(step)
+			cbs.emitTurnEnd(StopReasonError)
 			return nil, fmt.Errorf("stream turn %d: %w", step, streamErr)
 		}
 		// Defense in depth: even if streamOneTurn returned nil error (e.g. because a
 		// worker exited on cancel without pushing a result), check ctx and bail out
 		// before another LLM round-trip.
 		if err := ctx.Err(); err != nil {
-			cbs.emitTurnEnd(step, StopReasonCanceled)
+			cbs.emitStepEnd(step)
+			cbs.emitTurnEnd(StopReasonCanceled)
 			return &RunResult{Response: responseText.String(), Steps: steps}, err
 		}
 
@@ -214,20 +228,19 @@ func Run(
 		if toolCallDetected {
 			hallucinationCount++
 			if hallucinationCount > MaxHallucinationRetries {
-				cbs.emitTurnEnd(step, StopReasonError)
+				cbs.emitStepEnd(step)
+				cbs.emitTurnEnd(StopReasonHallucinationLimit)
 				return nil, fmt.Errorf("logos: tool call hallucination not resolved after %d retries", MaxHallucinationRetries)
 			}
 			directive := hallucinationDirective(hallucinationCount)
 			slog.Warn("tool call hallucination detected", "step", step, "attempt", hallucinationCount)
-			if cbs.OnRetry != nil {
-				cbs.OnRetry("tool_call", step)
-			}
 			// Record both the wrong output and feedback in Steps (for conversation restore).
 			steps = append(steps, newAssistantStep(fullText, reasoning, reasoningSig))
 			steps = append(steps, StepMessage{Role: StepRoleResult, Content: directive, Timestamp: time.Now().UTC()})
 			aMsg := newAssistantMessage(fullText, reasoning, reasoningSig)
 			messages = append(messages, aMsg, fantasy.NewUserMessage(directive))
-			cbs.emitTurnEnd(step, StopReasonToolCallRetry)
+			cbs.emitStepEnd(step)
+			// turn continues; OnTurnEnd fires only at Run() exit (not per step).
 			continue
 		}
 
@@ -240,7 +253,8 @@ func Run(
 
 		if len(cmdResults) == 0 {
 			// Final answer — return
-			cbs.emitTurnEnd(step, StopReasonEndTurn)
+			cbs.emitStepEnd(step)
+			cbs.emitTurnEnd(StopReasonFinal)
 			return &RunResult{Response: responseText.String(), Steps: steps}, nil
 		}
 
@@ -249,10 +263,10 @@ func Run(
 		steps = append(steps, StepMessage{Role: StepRoleResult, Content: userContent, Timestamp: time.Now().UTC()})
 		aMsg2 := newAssistantMessage(cleanText, reasoning, reasoningSig)
 		messages = append(messages, aMsg2, fantasy.NewUserMessage(userContent))
-		cbs.emitTurnEnd(step, StopReasonToolUse)
+		cbs.emitStepEnd(step)
 	}
 
-	cbs.emitTurnEnd(step, StopReasonMaxSteps)
+	cbs.emitTurnEnd(StopReasonMaxSteps)
 	return &RunResult{
 		Response: responseText.String(),
 		Steps:    steps,
@@ -673,19 +687,20 @@ func executeOneCommand(
 	if err != nil {
 		slog.Error("temenos Run failure", "error", err)
 		result := formatOneResult(Result{Command: pendingCmd, Err: err})
-		return fullText, reasoningBuf, reasoningSig, hallucinated, []string{result}, nil
+		if cbs.OnCommandResult != nil {
+			cbs.OnCommandResult(pendingCmd, result, -1)
+		}
+		return fullText, reasoningBuf, reasoningSig, hallucinated, []string{result}, err
 	}
 
-	output := resp.Stdout
-	if resp.Stderr != "" {
-		output += "\nSTDERR:\n" + resp.Stderr
-	}
-	if output == "" {
-		output = "(no output)"
-	}
-
-	if cbs.OnCommandResult != nil {
-		cbs.OnCommandResult(pendingCmd, output, resp.ExitCode)
+	if resp == nil {
+		slog.Error("temenos Run returned nil response", "command", pendingCmd)
+		err := errors.New("runner returned nil response")
+		result := formatOneResult(Result{Command: pendingCmd, Err: err})
+		if cbs.OnCommandResult != nil {
+			cbs.OnCommandResult(pendingCmd, result, -1)
+		}
+		return fullText, reasoningBuf, reasoningSig, hallucinated, []string{result}, err
 	}
 
 	result := formatOneResult(Result{
@@ -694,6 +709,10 @@ func executeOneCommand(
 		Stderr:   resp.Stderr,
 		ExitCode: resp.ExitCode,
 	})
+
+	if cbs.OnCommandResult != nil {
+		cbs.OnCommandResult(pendingCmd, result, resp.ExitCode)
+	}
 
 	return fullText, reasoningBuf, reasoningSig, hallucinated, []string{result}, nil
 }
