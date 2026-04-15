@@ -32,7 +32,7 @@ Pre-commit hooks (lefthook): fmt check, vet, lint — run in parallel.
 
 This is a single-package library (`package logos`). All source is at the root.
 
-- **run.go** — Core `Run()` function: the agent loop. Takes `Config` (provider, model, Sandbox, SandboxAddr, sandbox env), conversation history, a prompt, and streaming callbacks. Returns `RunResult` with accumulated response text and step messages. Internally uses `resolveRunner` to select either `localRunner` (unsandboxed `/bin/bash`) or temenos client, then executes commands via `commandRunner` interface.
+- **run.go** — Core `Run()` function: the agent loop. Takes `Config` (provider, model, Sandbox, SandboxAddr, sandbox env), conversation history, a prompt, and `Callbacks` (streaming hooks: `OnDelta`, `OnReasoningDelta`, `OnReasoningSignature`, `OnCommandResult`, `OnTurnStart`, `OnTurnEnd`, `OnRetry`). Returns `RunResult` with accumulated response text and step messages. Internally uses `resolveRunner` to select either `localRunner` (unsandboxed `/bin/bash`) or temenos client, then executes commands via `commandRunner` interface.
 - **local_runner.go** — `localRunner`: unsandboxed command execution via `os/exec`. Selected when `Config.Sandbox` is false.
 - **runner_resolve.go** — `resolveRunner`: selects the appropriate `commandRunner` from `Config`.
 - **client.go** — `newClient`: creates a temenos `*client.Client`.

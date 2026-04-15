@@ -38,6 +38,18 @@ const CmdBlockOpen = "<cmd>"
 // CmdBlockClose is the closing tag for command blocks: <cmd>...</cmd>.
 const CmdBlockClose = "</cmd>"
 
+// StopReason describes why a turn ended. Used by the OnTurnEnd callback.
+type StopReason string
+
+const (
+	StopReasonToolUse       StopReason = "tool_use"        // command executed, loop continues
+	StopReasonEndTurn       StopReason = "end_turn"        // final answer, no command
+	StopReasonCanceled      StopReason = "canceled"        // context cancelled
+	StopReasonError         StopReason = "error"           // non-cancellation stream error
+	StopReasonToolCallRetry StopReason = "tool_call_retry" // hallucination detected, retrying
+	StopReasonMaxSteps      StopReason = "max_steps"       // max steps exhausted
+)
+
 // Re-exported from temenos/client so consumers don't import temenos directly.
 // commandRunner executes a single command.
 // Both *client.Client and *localRunner satisfy this interface.
@@ -84,19 +96,50 @@ type RunResult struct {
 
 // Callbacks holds optional streaming callbacks for the agent loop.
 // All fields are nil-safe — unset callbacks are simply not called.
+//
+// Callback firing order within a single turn:
+//  1. OnTurnStart           — before the model call begins
+//  2. OnDelta / OnReasoningDelta — interleaved text / thinking deltas from the stream
+//  3. OnReasoningSignature — once when the reasoning signature is finalised
+//  4. OnCommandResult       — after the command executes (if any command was found)
+//  5. OnTurnEnd             — turn completes; reason is a StopReason constant:
+//     StopReasonToolUse | StopReasonEndTurn | StopReasonCanceled |
+//     StopReasonError | StopReasonToolCallRetry | StopReasonMaxSteps
 type Callbacks struct {
 	// OnDelta is called with each text delta as the LLM streams its response.
 	OnDelta func(text string)
+	// OnReasoningDelta streams thinking content live as it arrives.
+	OnReasoningDelta func(text string)
+	// OnReasoningSignature fires once per turn when the reasoning block is finalised.
+	OnReasoningSignature func(signature string)
 	// OnCommandResult is called after a command executes with the command string,
 	// raw combined stdout+stderr output (no exit code suffix), and the exit code.
 	OnCommandResult func(command string, output string, exitCode int)
 	// OnRetry is called when a tool call hallucination (XML or bracket) is detected
 	// and an "unprocessed" directive is injected. reason is "tool_call".
 	OnRetry func(reason string, step int)
+	// OnTurnStart fires before each model call. turnIdx is the zero-based turn number.
+	OnTurnStart func(turnIdx int)
+	// OnTurnEnd fires after each turn completes. turnIdx is the zero-based turn number.
+	// reason is a StopReason constant: StopReasonToolUse | StopReasonEndTurn |
+	// StopReasonCanceled | StopReasonError | StopReasonToolCallRetry | StopReasonMaxSteps.
+	// Note: for StopReasonMaxSteps, turnIdx equals max steps (no paired OnTurnStart).
+	OnTurnEnd func(turnIdx int, reason StopReason)
+}
+
+// emitTurnEnd fires the OnTurnEnd callback with a stop reason, nil-safe.
+// Extracted to avoid repeating the nil-check at every exit path.
+func (cbs Callbacks) emitTurnEnd(turnIdx int, reason StopReason) {
+	if cbs.OnTurnEnd != nil {
+		cbs.OnTurnEnd(turnIdx, reason)
+	}
 }
 
 // Run executes the agent loop: prompt → LLM → <cmd> blocks → repeat.
 // Stateless — the caller handles conversation persistence.
+// Complexity is inherent to switch + stream loop routing.
+//
+//nolint:gocyclo
 func Run(
 	ctx context.Context,
 	cfg Config,
@@ -138,8 +181,11 @@ func Run(
 		responseText       strings.Builder
 		hallucinationCount int
 	)
-
-	for step := 0; step < maxSteps; step++ {
+	var step int
+	for step = 0; step < maxSteps; step++ {
+		if cbs.OnTurnStart != nil {
+			cbs.OnTurnStart(step)
+		}
 		onDelta := func(text string) {
 			if cbs.OnDelta != nil {
 				cbs.OnDelta(text)
@@ -150,14 +196,17 @@ func Run(
 		if streamErr != nil {
 			// Surface cancellation directly so callers can errors.Is(err, context.Canceled).
 			if isCancellation(streamErr) {
+				cbs.emitTurnEnd(step, StopReasonCanceled)
 				return &RunResult{Response: responseText.String(), Steps: steps}, streamErr
 			}
+			cbs.emitTurnEnd(step, StopReasonError)
 			return nil, fmt.Errorf("stream turn %d: %w", step, streamErr)
 		}
 		// Defense in depth: even if streamOneTurn returned nil error (e.g. because a
 		// worker exited on cancel without pushing a result), check ctx and bail out
 		// before another LLM round-trip.
 		if err := ctx.Err(); err != nil {
+			cbs.emitTurnEnd(step, StopReasonCanceled)
 			return &RunResult{Response: responseText.String(), Steps: steps}, err
 		}
 
@@ -165,6 +214,7 @@ func Run(
 		if toolCallDetected {
 			hallucinationCount++
 			if hallucinationCount > MaxHallucinationRetries {
+				cbs.emitTurnEnd(step, StopReasonError)
 				return nil, fmt.Errorf("logos: tool call hallucination not resolved after %d retries", MaxHallucinationRetries)
 			}
 			directive := hallucinationDirective(hallucinationCount)
@@ -177,6 +227,7 @@ func Run(
 			steps = append(steps, StepMessage{Role: StepRoleResult, Content: directive, Timestamp: time.Now().UTC()})
 			aMsg := newAssistantMessage(fullText, reasoning, reasoningSig)
 			messages = append(messages, aMsg, fantasy.NewUserMessage(directive))
+			cbs.emitTurnEnd(step, StopReasonToolCallRetry)
 			continue
 		}
 
@@ -189,6 +240,7 @@ func Run(
 
 		if len(cmdResults) == 0 {
 			// Final answer — return
+			cbs.emitTurnEnd(step, StopReasonEndTurn)
 			return &RunResult{Response: responseText.String(), Steps: steps}, nil
 		}
 
@@ -197,8 +249,10 @@ func Run(
 		steps = append(steps, StepMessage{Role: StepRoleResult, Content: userContent, Timestamp: time.Now().UTC()})
 		aMsg2 := newAssistantMessage(cleanText, reasoning, reasoningSig)
 		messages = append(messages, aMsg2, fantasy.NewUserMessage(userContent))
+		cbs.emitTurnEnd(step, StopReasonToolUse)
 	}
 
+	cbs.emitTurnEnd(step, StopReasonMaxSteps)
 	return &RunResult{
 		Response: responseText.String(),
 		Steps:    steps,
@@ -499,6 +553,9 @@ func firstNonNeg(a, b int) int {
 // whether a tool call hallucination was detected, command results, and any error.
 // Reasoning fields are empty for providers that don't emit thinking blocks.
 // cmdBlockBuffer.Flush() is deferred so buffered content is always emitted, even on error.
+// Complexity is inherent to switch + stream loop routing.
+//
+//nolint:gocyclo
 func streamOneTurn(
 	ctx context.Context,
 	model fantasy.LanguageModel,
@@ -554,12 +611,18 @@ func streamOneTurn(
 		case fantasy.StreamPartTypeReasoningDelta:
 			if part.Delta != "" {
 				reasoningBuf.WriteString(part.Delta)
+				if cbs.OnReasoningDelta != nil {
+					cbs.OnReasoningDelta(part.Delta)
+				}
 			}
 			// Signature arrives as a ReasoningDelta with empty Delta and ProviderMetadata.
 			if part.ProviderMetadata != nil {
 				if meta, ok := part.ProviderMetadata[anthropic.Name]; ok {
 					if rm, ok := meta.(*anthropic.ReasoningOptionMetadata); ok && rm.Signature != "" {
 						reasoningSig = rm.Signature
+						if cbs.OnReasoningSignature != nil {
+							cbs.OnReasoningSignature(rm.Signature)
+						}
 					}
 				}
 			}
@@ -595,6 +658,9 @@ func executeOneCommand(
 	hallucinated bool,
 ) (string, string, string, bool, []string, error) {
 	if directive, ok := handleBlockedCommand(pendingCmd); ok {
+		if cbs.OnCommandResult != nil {
+			cbs.OnCommandResult(pendingCmd, directive, -2)
+		}
 		return fullText, reasoningBuf, reasoningSig, hallucinated,
 			[]string{pendingCmd + "\n" + directive}, nil
 	}

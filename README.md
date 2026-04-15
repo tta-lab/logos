@@ -104,7 +104,7 @@ logos detects the commands, executes them in the configured backend, and feeds t
 | `Config` | Provider, model, Sandbox/SandboxAddr, sandbox env, allowed paths |
 | `RunResult` | Final response text + all step messages |
 | `StepMessage` | One message in the loop (assistant text, with optional reasoning, or command output) |
-| `Callbacks` | Optional `OnDelta` and `OnCommandResult` streaming hooks |
+| `Callbacks` | Optional streaming hooks: `OnDelta`, `OnReasoningDelta`, `OnReasoningSignature`, `OnCommandResult`, `OnTurnStart`, `OnTurnEnd`, `OnRetry` |
 | `ParseCmdBlocks` | Extract `<cmd>` block contents from a complete assistant message |
 | `ExecuteBlocks` | Run parsed commands concurrently, return `[]Result` |
 | `FormatResults` | Render `[]Result` as a `<result>` wrap for the model |

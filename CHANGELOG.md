@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.8.0
+
+### Added
+
+- **`OnTurnStart` / `OnTurnEnd` callbacks** — expose multi-turn structure to callers. `OnTurnStart(idx)` fires before each model call; `OnTurnEnd(idx, stopReason)` fires after each turn completes. The `stopReason` string identifies why the turn ended: `"tool_use"` (command executed, loop continues), `"end_turn"` (final answer, Run returns nil), `"canceled"` (context cancelled), `"error"` (stream error), `"tool_call_retry"` (hallucination detected, retrying the same turn).
+- **`OnReasoningDelta` / `OnReasoningSignature` callbacks** — stream thinking content live as it arrives (previously only available post-Run via `result.Steps`). `OnReasoningDelta` fires for each delta; `OnReasoningSignature` fires once per turn when the reasoning block is finalised.
+
 ## Unreleased
 
 ### Breaking Changes
