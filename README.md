@@ -76,17 +76,20 @@ result, err := logos.Run(ctx, logos.Config{
     // Step lifecycle — fires for each model call:
     OnStepStart: func(stepIdx int) { fmt.Printf("step %d start\n", stepIdx) },
     OnStepEnd:   func(stepIdx int) { fmt.Printf("step %d done\n", stepIdx) },
+    // Per-step usage — fires after each model stream finishes, before command execution:
+    OnStepUsage: func(stepIdx int, usage fantasy.Usage, _ fantasy.ProviderMetadata) {
+        fmt.Printf("step %d: %d in / %d out tokens\n", stepIdx, usage.InputTokens, usage.OutputTokens)
+    },
     // Per-turn termination — fires exactly once at Run() exit:
     OnTurnEnd: func(reason logos.StopReason) { fmt.Printf("done: %s\n", reason) },
 })
 ```
 
-The LLM responds in plain text. When it wants to act, it wraps commands in a `<cmd>` block:
+The LLM responds in plain text. When it wants to act, it wraps commands in a `<cmd>` block. All reasoning or commentary goes inside the block as shell comments — no prose before or after:
 
 ```
-Let me check the file structure first.
-
 <cmd>
+# Check the file structure first
 ls -la /app
 </cmd>
 ```
@@ -109,7 +112,7 @@ logos detects the commands, executes them in the configured backend, and feeds t
 | `Config` | Provider, model, Sandbox/SandboxAddr, sandbox env, allowed paths |
 | `RunResult` | Final response text + all step messages |
 | `StepMessage` | One message in the loop (assistant text, with optional reasoning, or command output) |
-| `Callbacks` | Per-step hooks (`OnStepStart`, `OnStepEnd`, `OnDelta`, `OnReasoningDelta`, `OnReasoningSignature`, `OnCommandResult`) plus per-turn hook (`OnTurnEnd` with `StopReason`). One Turn = one `Run()` call; multiple Steps per Turn. |
+| `Callbacks` | Per-step hooks (`OnStepStart`, `OnStepEnd`, `OnDelta`, `OnReasoningDelta`, `OnReasoningSignature`, `OnStepUsage`, `OnCommandResult`) plus per-turn hook (`OnTurnEnd` with `StopReason`). One Turn = one `Run()` call; multiple Steps per Turn. |
 | `StopReason` | Why `Run()` terminated: `final` / `canceled` / `error` / `hallucination_limit` / `max_steps` |
 | `ParseCmdBlocks` | Extract `<cmd>` block contents from a complete assistant message |
 | `ExecuteBlocks` | Run parsed commands concurrently, return `[]Result` |

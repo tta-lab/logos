@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -435,60 +436,6 @@ func TestRun_ExitCodeFormatted(t *testing.T) {
 	assert.Contains(t, cmdStep.Content, "(exit code: 1)")
 }
 
-// --- stripPostCmdText tests ---
-
-func TestStripPostCmdText_PureSpeech(t *testing.T) {
-	input := "Done. Here's what I found."
-	assert.Equal(t, input, stripPostCmdText(input))
-}
-
-func TestStripPostCmdText_PreamblePlusCmd(t *testing.T) {
-	input := "Let me check.\n<cmd>\nls\n</cmd>"
-	assert.Equal(t, input, stripPostCmdText(input))
-}
-
-func TestStripPostCmdText_PreambleCmdPostProse(t *testing.T) {
-	input := "Checking.\n<cmd>\nls\n</cmd>\nfile.go"
-	expected := "Checking.\n<cmd>\nls\n</cmd>"
-	assert.Equal(t, expected, stripPostCmdText(input))
-}
-
-func TestStripPostCmdText_TwoCmdsBetweenProse(t *testing.T) {
-	input := "Running both.\n<cmd>\na\n</cmd>\nfound a\n<cmd>\nb\n</cmd>"
-	// LastIndex: keep everything up to and including the last </cmd>.
-	expected := "Running both.\n<cmd>\na\n</cmd>\nfound a\n<cmd>\nb\n</cmd>"
-	assert.Equal(t, expected, stripPostCmdText(input))
-}
-
-func TestStripPostCmdText_CmdBetweenPost(t *testing.T) {
-	input := "A.\n<cmd>\nx\n</cmd>\nb\n<cmd>\ny\n</cmd>\nz"
-	// LastIndex: keep everything up to the last </cmd>, preserving everything before.
-	expected := "A.\n<cmd>\nx\n</cmd>\nb\n<cmd>\ny\n</cmd>"
-	assert.Equal(t, expected, stripPostCmdText(input))
-}
-
-func TestStripPostCmdText_UnclosedCmd(t *testing.T) {
-	// No </cmd> found — LastIndex returns -1, input returned unchanged.
-	input := "text\n<cmd>\nls"
-	assert.Equal(t, input, stripPostCmdText(input))
-}
-
-func TestStripPostCmdText_EmptyInput(t *testing.T) {
-	assert.Equal(t, "", stripPostCmdText(""))
-}
-
-func TestStripPostCmdText_LeadingCmdNoPreamble(t *testing.T) {
-	input := "<cmd>\nls\n</cmd>"
-	assert.Equal(t, input, stripPostCmdText(input))
-}
-
-func TestStripPostCmdText_NestedCmdInHeredoc(t *testing.T) {
-	// LastIndex ensures the outermost </cmd> is used.
-	input := "<cmd>\ncat <<'EOF'\n</cmd>\nhello\nEOF\n</cmd>\npost"
-	expected := "<cmd>\ncat <<'EOF'\n</cmd>\nhello\nEOF\n</cmd>"
-	assert.Equal(t, expected, stripPostCmdText(input))
-}
-
 // --- StepsToMessages tests ---
 
 func TestStepsToMessages_AssistantWithReasoning(t *testing.T) {
@@ -865,8 +812,11 @@ func TestRun_CallbackOrder_WithinStep(t *testing.T) {
 		OnReasoningDelta:     func(s string) { invocations = append(invocations, "reasoning_delta:"+s) },
 		OnDelta:              func(s string) { invocations = append(invocations, "delta:"+s) },
 		OnReasoningSignature: func(s string) { invocations = append(invocations, "reasoning_signature:"+s) },
-		OnCommandResult:      func(string, string, int) { invocations = append(invocations, "command_result") },
-		OnStepEnd:            func(idx int) { invocations = append(invocations, fmt.Sprintf("step_end:%d", idx)) },
+		OnStepUsage: func(idx int, _ fantasy.Usage, _ fantasy.ProviderMetadata) {
+			invocations = append(invocations, fmt.Sprintf("step_usage:%d", idx))
+		},
+		OnCommandResult: func(string, string, int) { invocations = append(invocations, "command_result") },
+		OnStepEnd:       func(idx int) { invocations = append(invocations, fmt.Sprintf("step_end:%d", idx)) },
 		OnTurnEnd: func(reason StopReason) {
 			invocations = append(invocations, fmt.Sprintf("turn_end:%s", reason))
 		},
@@ -884,6 +834,7 @@ func TestRun_CallbackOrder_WithinStep(t *testing.T) {
 	// Verify intermediate labels appear between step_start and step_end.
 	assert.Contains(t, invocations, "reasoning_delta:thinking...")
 	assert.Contains(t, invocations, "reasoning_signature:sig123")
+	assert.Contains(t, invocations, "step_usage:0")
 	assert.Contains(t, invocations, "command_result")
 
 	// Exactly one step_end and one turn_end.
@@ -1013,7 +964,7 @@ func TestRun_OnCommandResult_NonZeroExitCode(t *testing.T) {
 	assert.Contains(t, gotOutput, "file.txt: no such file or directory")
 	assert.Contains(t, gotOutput, "(exit code: 1)")
 	assert.Equal(t, 1, gotExitCode, "exit code should be propagated from runner")
-	// Response includes the cmd block text (stripPostCmdText strips text after </cmd>).
+	// Cmd step persists only the block; final-answer step appends "done".
 	assert.Contains(t, result.Response, "<cmd>grep foo file.txt</cmd>")
 }
 
@@ -1133,7 +1084,7 @@ func TestRun_AllCallbacks_NilSafe(t *testing.T) {
 	}}
 	runner := &mockCommandRunner{response: client.RunResponse{Stdout: "out", ExitCode: 0}}
 
-	// Must not panic with all-nil callbacks across 2 steps (all 7 fields nil-safe).
+	// Must not panic with all-nil callbacks across 2 steps (all 8 fields nil-safe).
 	assert.NotPanics(t, func() {
 		_, _ = Run(context.Background(), withTestRunner(newCfg(model), runner), nil, "go", Callbacks{})
 	})
@@ -1196,20 +1147,31 @@ func TestRun_UsagePopulated(t *testing.T) {
 		maxCalls: 1,
 	}
 	runner := &mockCommandRunner{response: client.RunResponse{Stdout: "ok", ExitCode: 0}}
-	cbs := Callbacks{}
+
+	var gotStepIdx int
+	var gotUsage fantasy.Usage
+	var gotMeta fantasy.ProviderMetadata
+	cbs := Callbacks{
+		OnStepUsage: func(stepIdx int, usage fantasy.Usage, meta fantasy.ProviderMetadata) {
+			gotStepIdx = stepIdx
+			gotUsage = usage
+			gotMeta = meta
+		},
+	}
 
 	result, err := Run(context.Background(), withTestRunner(newCfg(model), runner), nil, "say hello", cbs)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 
-	assert.Equal(t, int64(42), result.Usage.InputTokens)
-	assert.Equal(t, int64(100), result.Usage.OutputTokens)
-	assert.Equal(t, wantMeta, result.ProviderMetadata)
+	assert.Equal(t, 0, gotStepIdx)
+	assert.Equal(t, int64(42), gotUsage.InputTokens)
+	assert.Equal(t, int64(100), gotUsage.OutputTokens)
+	assert.Equal(t, wantMeta, gotMeta)
 }
 
-func TestRun_UsageLastStepWins(t *testing.T) {
+func TestRun_UsagePerStep(t *testing.T) {
 	// Step 1: cmd → result, usage[0]. Step 2: final answer, usage[1].
-	// Result should reflect step 2 (last step wins).
+	// OnStepUsage fires once per step with that step's usage.
 	model := &mockLanguageModelWithUsage{
 		model: "test-model",
 		usage: []fantasy.Usage{
@@ -1217,19 +1179,123 @@ func TestRun_UsageLastStepWins(t *testing.T) {
 			{InputTokens: 2000, OutputTokens: 600},
 		},
 		responses: []string{
-			"<cmd>echo ok</cmd>", // step 1: triggers cmd execution → step 2
-			"final answer",       // step 2: no cmd → done
+			"<cmd>echo ok</cmd>", // step 0: triggers cmd execution
+			"final answer",       // step 1: no cmd → done
 		},
 		maxCalls: 2,
 	}
 	runner := &mockCommandRunner{response: client.RunResponse{Stdout: "ok", ExitCode: 0}}
-	cbs := Callbacks{}
 
-	result, err := Run(context.Background(), withTestRunner(newCfg(model), runner), nil, "run two commands", cbs)
+	type usageRecord struct {
+		stepIdx int
+		usage   fantasy.Usage
+	}
+	var records []usageRecord
+	cbs := Callbacks{
+		OnStepUsage: func(stepIdx int, usage fantasy.Usage, _ fantasy.ProviderMetadata) {
+			records = append(records, usageRecord{stepIdx: stepIdx, usage: usage})
+		},
+	}
+
+	result, err := Run(context.Background(), withTestRunner(newCfg(model), runner), nil, "run two steps", cbs)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 
-	// Step 2's usage should be the one on the result (last step wins).
-	assert.Equal(t, int64(2000), result.Usage.InputTokens)
-	assert.Equal(t, int64(600), result.Usage.OutputTokens)
+	require.Len(t, records, 2, "OnStepUsage fires once per step")
+	assert.Equal(t, 0, records[0].stepIdx)
+	assert.Equal(t, int64(1000), records[0].usage.InputTokens)
+	assert.Equal(t, int64(500), records[0].usage.OutputTokens)
+	assert.Equal(t, 1, records[1].stepIdx)
+	assert.Equal(t, int64(2000), records[1].usage.InputTokens)
+	assert.Equal(t, int64(600), records[1].usage.OutputTokens)
+}
+
+// --- Parser behavior tests ---
+
+// captureWarnLogs installs a temporary slog handler that captures Warn-level records
+// and returns the buffer. Restores the previous default logger on cleanup.
+func captureWarnLogs(t *testing.T) *strings.Builder {
+	t.Helper()
+	var buf strings.Builder
+	h := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})
+	old := slog.Default()
+	slog.SetDefault(slog.New(h))
+	t.Cleanup(func() { slog.SetDefault(old) })
+	return &buf
+}
+
+func TestRun_PersistsOnlyCmdBlock_WhenCmdPresent(t *testing.T) {
+	// Model writes pre-cmd prose then a cmd block — only the block is persisted.
+	model := &mockLanguageModel{responses: []string{
+		"Let me check first.\n<cmd>\nls\n</cmd>",
+		"done",
+	}}
+	runner := &mockCommandRunner{response: client.RunResponse{Stdout: "ok", ExitCode: 0}}
+	result, err := Run(context.Background(), withTestRunner(newCfg(model), runner), nil, "go", Callbacks{})
+	require.NoError(t, err)
+	// The assistant step content must be only the cmd block, not the prose preamble.
+	require.GreaterOrEqual(t, len(result.Steps), 1)
+	assert.Equal(t, "<cmd>\nls\n</cmd>", result.Steps[0].Content)
+}
+
+func TestRun_PersistsReplyText_WhenNoCmd(t *testing.T) {
+	// Reply step: no cmd → full reply text is persisted.
+	model := &mockLanguageModel{responses: []string{"final answer"}}
+	result, err := Run(context.Background(), newCfg(model), nil, "go", Callbacks{})
+	require.NoError(t, err)
+	require.Len(t, result.Steps, 1)
+	assert.Equal(t, "final answer", result.Steps[0].Content)
+}
+
+func TestRun_DropsPreCmdProse_LogsWarn(t *testing.T) {
+	buf := captureWarnLogs(t)
+	model := &mockLanguageModel{responses: []string{
+		"I think I should check.\n<cmd>\nls\n</cmd>",
+		"done",
+	}}
+	runner := &mockCommandRunner{response: client.RunResponse{Stdout: "ok", ExitCode: 0}}
+	_, err := Run(context.Background(), withTestRunner(newCfg(model), runner), nil, "go", Callbacks{})
+	require.NoError(t, err)
+	assert.Contains(t, buf.String(), "pre-cmd prose dropped", "slog.Warn should fire for non-whitespace pre-cmd prose")
+}
+
+func TestRun_DropsPostCmdProse_LogsWarn(t *testing.T) {
+	buf := captureWarnLogs(t)
+	model := &mockLanguageModel{responses: []string{
+		"<cmd>\nls\n</cmd>\nThis should be dropped.",
+		"done",
+	}}
+	runner := &mockCommandRunner{response: client.RunResponse{Stdout: "ok", ExitCode: 0}}
+	_, err := Run(context.Background(), withTestRunner(newCfg(model), runner), nil, "go", Callbacks{})
+	require.NoError(t, err)
+	assert.Contains(t, buf.String(), "post-cmd prose dropped", "slog.Warn should fire for non-whitespace post-cmd prose")
+}
+
+func TestRun_StreamsPreCmdProseLive(t *testing.T) {
+	// Pre-cmd prose reaches OnDelta even though it is not persisted.
+	model := &mockLanguageModel{responses: []string{
+		"thinking...\n<cmd>\nls\n</cmd>",
+		"done",
+	}}
+	runner := &mockCommandRunner{response: client.RunResponse{Stdout: "ok", ExitCode: 0}}
+	var allDeltas []string
+	cbs := Callbacks{OnDelta: func(s string) { allDeltas = append(allDeltas, s) }}
+	_, err := Run(context.Background(), withTestRunner(newCfg(model), runner), nil, "go", cbs)
+	require.NoError(t, err)
+	combined := strings.Join(allDeltas, "")
+	assert.Contains(t, combined, "thinking...")
+	assert.Contains(t, combined, "<cmd>\nls\n</cmd>")
+}
+
+func TestRun_NoWarnOnWhitespaceAroundCmd(t *testing.T) {
+	buf := captureWarnLogs(t)
+	// Only whitespace/newlines around the cmd block — no Warn expected.
+	model := &mockLanguageModel{responses: []string{
+		"<cmd>\nls\n</cmd>\n  \n",
+		"done",
+	}}
+	runner := &mockCommandRunner{response: client.RunResponse{Stdout: "ok", ExitCode: 0}}
+	_, err := Run(context.Background(), withTestRunner(newCfg(model), runner), nil, "go", Callbacks{})
+	require.NoError(t, err)
+	assert.NotContains(t, buf.String(), "post-cmd prose dropped")
 }

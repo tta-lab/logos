@@ -22,6 +22,7 @@ func TestBuildSystemPrompt_AllFields(t *testing.T) {
 	assert.Contains(t, result, "linux")
 	assert.Contains(t, result, "2026-03-12")
 	assert.Contains(t, result, "# Command Mode")
+	assert.Contains(t, result, "Put ANY reasoning or commentary as shell comments")
 }
 
 func TestBuildSystemPrompt_EmptyWorkingDir_OmitsIt(t *testing.T) {
@@ -106,6 +107,7 @@ func TestBuildSystemPrompt_NoCommands_NoAvailableSection(t *testing.T) {
 
 	assert.NotContains(t, result, "# Available Commands")
 	assert.Contains(t, result, "# Command Mode")
+	assert.Contains(t, result, "Put ANY reasoning or commentary as shell comments")
 }
 
 func TestBuildSystemPrompt_CommandOrder_Preserved(t *testing.T) {

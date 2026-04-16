@@ -90,11 +90,10 @@ type StepMessage struct {
 }
 
 // RunResult contains the agent's output after a loop completes.
+// Per-step token usage is reported via Callbacks.OnStepUsage.
 type RunResult struct {
-	Response         string                   // final text response (accumulated assistant text)
-	Steps            []StepMessage            // all messages generated (for persistence by caller)
-	Usage            fantasy.Usage            // from last step's finish event
-	ProviderMetadata fantasy.ProviderMetadata // from last step's finish event
+	Response string        // final text response (accumulated assistant text)
+	Steps    []StepMessage // all messages generated (for persistence by caller)
 }
 
 // Callbacks holds optional streaming callbacks for the agent loop.
@@ -104,15 +103,16 @@ type RunResult struct {
 //
 //	Step — one iteration of the loop (one model call + optional cmd execution).
 //	       Multiple steps per Turn.
-//	Turn — one full agent response cycle. Exactly one Turn per Run() call.
+//	Turn — one full agent response cycle. Exactly one Run() call.
 //
 // Firing order within a Turn:
 //  1. OnStepStart(0)
 //  2. OnDelta / OnReasoningDelta — interleaved during streaming
 //  3. OnReasoningSignature       — once when reasoning block finalises
-//  4. OnCommandResult            — if a cmd block executed
-//  5. OnStepEnd(0)
-//     ... (steps repeat 1-5 with stepIdx incrementing)
+//  4. OnStepUsage(0, usage, meta) — once when the model stream finishes
+//  5. OnCommandResult            — if a cmd block executed
+//  6. OnStepEnd(0)
+//     ... (steps repeat 1-6 with stepIdx incrementing)
 //     N. OnTurnEnd(reason) — exactly once at Run() exit
 type Callbacks struct {
 	// OnStepStart fires before each model call. stepIdx is the zero-based step number.
@@ -125,6 +125,9 @@ type Callbacks struct {
 	OnReasoningDelta func(text string)
 	// OnReasoningSignature fires once per step when the reasoning block is finalised.
 	OnReasoningSignature func(signature string)
+	// OnStepUsage fires once per step immediately after the model stream finishes,
+	// before any command is executed. stepIdx is the zero-based step number.
+	OnStepUsage func(stepIdx int, usage fantasy.Usage, meta fantasy.ProviderMetadata)
 	// OnCommandResult is called after a command executes (or is blocked/runner errors).
 	// command: the command that was run.
 	// output: formatOneResult output on success; directive text on blocked commands (exitCode=-2);
@@ -194,8 +197,6 @@ func Run(
 		steps              []StepMessage
 		responseText       strings.Builder
 		hallucinationCount int
-		lastUsage          fantasy.Usage
-		lastMeta           fantasy.ProviderMetadata
 	)
 	for step := 0; step < maxSteps; step++ {
 		if cbs.OnStepStart != nil {
@@ -206,21 +207,16 @@ func Run(
 				cbs.OnDelta(text)
 			}
 		}
-		fullText, reasoning, reasoningSig, toolCallDetected, cmdResults, stepUsage, stepMeta, streamErr :=
-			streamOneTurn(ctx, model, messages, maxTokens, cfg, cbs, onDelta)
-		// Track last step's usage for RunResult (last step wins).
-		lastUsage = stepUsage
-		lastMeta = stepMeta
+		text, reasoning, reasoningSig, toolCallDetected, cmdResults, streamErr :=
+			streamOneTurn(ctx, model, messages, maxTokens, cfg, cbs, step, onDelta)
 		if streamErr != nil {
 			// Surface cancellation directly so callers can errors.Is(err, context.Canceled).
 			if isCancellation(streamErr) {
 				cbs.emitStepEnd(step)
 				cbs.emitTurnEnd(StopReasonCanceled)
 				return &RunResult{
-					Response:         responseText.String(),
-					Steps:            steps,
-					Usage:            lastUsage,
-					ProviderMetadata: lastMeta,
+					Response: responseText.String(),
+					Steps:    steps,
 				}, streamErr
 			}
 			cbs.emitStepEnd(step)
@@ -234,10 +230,8 @@ func Run(
 			cbs.emitStepEnd(step)
 			cbs.emitTurnEnd(StopReasonCanceled)
 			return &RunResult{
-				Response:         responseText.String(),
-				Steps:            steps,
-				Usage:            lastUsage,
-				ProviderMetadata: lastMeta,
+				Response: responseText.String(),
+				Steps:    steps,
 			}, err
 		}
 
@@ -252,54 +246,39 @@ func Run(
 			directive := hallucinationDirective(hallucinationCount)
 			slog.Warn("tool call hallucination detected", "step", step, "attempt", hallucinationCount)
 			// Record both the wrong output and feedback in Steps (for conversation restore).
-			steps = append(steps, newAssistantStep(fullText, reasoning, reasoningSig))
+			steps = append(steps, newAssistantStep(text, reasoning, reasoningSig))
 			steps = append(steps, StepMessage{Role: StepRoleResult, Content: directive, Timestamp: time.Now().UTC()})
-			aMsg := newAssistantMessage(fullText, reasoning, reasoningSig)
+			aMsg := newAssistantMessage(text, reasoning, reasoningSig)
 			messages = append(messages, aMsg, fantasy.NewUserMessage(directive))
 			cbs.emitStepEnd(step)
 			// turn continues; OnTurnEnd fires only at Run() exit (not per step).
 			continue
 		}
 
-		// Strip hallucinated post-cmd text before persisting.
-		// fullText is written verbatim during streaming; cmdSeen suppressed OnDelta
-		// but fullText still captures raw output. Belt-and-suspenders: strip here.
-		cleanText := stripPostCmdText(fullText)
-		steps = append(steps, newAssistantStep(cleanText, reasoning, reasoningSig))
-		responseText.WriteString(cleanText)
+		// text is already the persist text (cmd block only for cmd steps; reply text for reply steps).
+		steps = append(steps, newAssistantStep(text, reasoning, reasoningSig))
+		responseText.WriteString(text)
 
 		if len(cmdResults) == 0 {
 			// Final answer — return
 			cbs.emitStepEnd(step)
 			cbs.emitTurnEnd(StopReasonFinal)
-			return &RunResult{Response: responseText.String(), Steps: steps, Usage: lastUsage, ProviderMetadata: lastMeta}, nil
+			return &RunResult{Response: responseText.String(), Steps: steps}, nil
 		}
 
 		userContent := "<result>\n" + strings.Join(cmdResults, "\n") + "\n</result>"
 
 		steps = append(steps, StepMessage{Role: StepRoleResult, Content: userContent, Timestamp: time.Now().UTC()})
-		aMsg2 := newAssistantMessage(cleanText, reasoning, reasoningSig)
+		aMsg2 := newAssistantMessage(text, reasoning, reasoningSig)
 		messages = append(messages, aMsg2, fantasy.NewUserMessage(userContent))
 		cbs.emitStepEnd(step)
 	}
 
 	cbs.emitTurnEnd(StopReasonMaxSteps)
 	return &RunResult{
-		Response:         responseText.String(),
-		Steps:            steps,
-		Usage:            lastUsage,
-		ProviderMetadata: lastMeta,
+		Response: responseText.String(),
+		Steps:    steps,
 	}, fmt.Errorf("logos: max steps (%d) reached", maxSteps)
-}
-
-// stripPostCmdText removes any text the model wrote after the closing </cmd>
-// tag. This text is hallucinated — the model hasn't seen results yet.
-// Uses LastIndex so the outermost </cmd> is used, preserving heredocs.
-func stripPostCmdText(s string) string {
-	if i := strings.LastIndex(s, CmdBlockClose); i >= 0 {
-		return s[:i+len(CmdBlockClose)]
-	}
-	return s
 }
 
 // StepsToMessages converts StepMessages back to fantasy.Messages for
@@ -582,8 +561,9 @@ func firstNonNeg(a, b int) int {
 }
 
 // streamOneTurn streams a single LLM response (no tools).
-// Returns the full unfiltered text, reasoning content, reasoning signature,
-// whether a tool call hallucination was detected, command results, and any error.
+// Returns the persist text (cmd block for cmd steps; reply text for reply steps),
+// reasoning content, reasoning signature, whether a tool call hallucination was
+// detected, command results, and any error.
 // Reasoning fields are empty for providers that don't emit thinking blocks.
 // cmdBlockBuffer.Flush() is deferred so buffered content is always emitted, even on error.
 // Complexity is inherent to switch + stream loop routing.
@@ -596,6 +576,7 @@ func streamOneTurn(
 	maxTokens int64,
 	cfg Config,
 	cbs Callbacks,
+	stepIdx int,
 	onDelta func(string),
 ) (
 	text string,
@@ -603,8 +584,6 @@ func streamOneTurn(
 	reasoningSig string,
 	hallucinated bool,
 	cmdResults []string,
-	usage fantasy.Usage,
-	meta fantasy.ProviderMetadata,
 	err error,
 ) {
 	stream, streamErr := model.Stream(ctx, fantasy.Call{
@@ -612,7 +591,7 @@ func streamOneTurn(
 		MaxOutputTokens: &maxTokens,
 	})
 	if streamErr != nil {
-		return "", "", "", false, nil, fantasy.Usage{}, nil, streamErr
+		return "", "", "", false, nil, streamErr
 	}
 
 	// Chain: hallucinationFilter → cmdBlockBuffer → onDelta
@@ -621,10 +600,11 @@ func streamOneTurn(
 	hallucinationFilter := &proseFilter{delegate: func(s string) { onDelta(s) }}
 
 	var (
-		fullText     strings.Builder
-		reasoningBuf strings.Builder
-		pendingCmd   string // at most one cmd
-		cmdSeen      bool   // suppress post-</cmd> text from onDelta
+		fullText      strings.Builder
+		reasoningBuf  strings.Builder
+		pendingCmd    string // at most one cmd
+		capturedBlock string // full <cmd>...</cmd> block for the first cmd
+		cmdSeen       bool   // suppress post-</cmd> text from onDelta
 	)
 
 	cmdFilter := &cmdBlockBuffer{
@@ -638,6 +618,7 @@ func streamOneTurn(
 			cmd := extractCmdFromBlock(block)
 			if pendingCmd == "" {
 				pendingCmd = cmd
+				capturedBlock = block
 			}
 			cmdSeen = true
 		},
@@ -675,26 +656,52 @@ func streamOneTurn(
 			}
 		case fantasy.StreamPartTypeError:
 			if part.Error != nil {
-				return fullText.String(), reasoningBuf.String(), reasoningSig,
-					hallucinationFilter.toolCallDetected, nil, finishUsage, finishMeta, part.Error
+				// Fire OnStepUsage even on stream error if we received a Finish part.
+				if (finishUsage != (fantasy.Usage{}) || finishMeta != nil) && cbs.OnStepUsage != nil {
+					cbs.OnStepUsage(stepIdx, finishUsage, finishMeta)
+				}
+				return "", "", "", false, nil, part.Error
 			}
 		case fantasy.StreamPartTypeFinish:
 			finishUsage = part.Usage
 			finishMeta = part.ProviderMetadata
+			if cbs.OnStepUsage != nil {
+				cbs.OnStepUsage(stepIdx, finishUsage, finishMeta)
+			}
 		default:
 			slog.Debug("streamOneTurn: unhandled stream part type", "type", part.Type)
 		}
 	}
 
+	// Build persist text: cmd steps persist only the block; reply steps persist all text.
+	rawText := fullText.String()
+	var persistText string
+	if pendingCmd != "" {
+		persistText = capturedBlock
+		// Warn on non-whitespace pre-cmd prose (streamed live but not persisted).
+		if idx := strings.Index(rawText, CmdBlockOpen); idx > 0 {
+			if pre := rawText[:idx]; strings.TrimSpace(pre) != "" {
+				slog.Warn("logos: pre-cmd prose dropped from persistence", "len", len(pre))
+			}
+		}
+		// Warn on non-whitespace post-cmd prose (not streamed to OnDelta, not persisted).
+		if lastClose := strings.LastIndex(rawText, CmdBlockClose); lastClose >= 0 {
+			if post := rawText[lastClose+len(CmdBlockClose):]; strings.TrimSpace(post) != "" {
+				slog.Warn("logos: post-cmd prose dropped from persistence", "len", len(post))
+			}
+		}
+	} else {
+		persistText = rawText
+	}
+
 	// Execute single command (no goroutine pool).
 	if pendingCmd == "" {
-		return fullText.String(), reasoningBuf.String(), reasoningSig,
-			hallucinationFilter.toolCallDetected, nil, finishUsage, finishMeta, nil
+		return persistText, reasoningBuf.String(), reasoningSig,
+			hallucinationFilter.toolCallDetected, nil, nil
 	}
 
 	return executeOneCommand(ctx, cfg, cbs, pendingCmd,
-		fullText.String(), reasoningBuf.String(), reasoningSig, hallucinationFilter.toolCallDetected,
-		finishUsage, finishMeta)
+		persistText, reasoningBuf.String(), reasoningSig, hallucinationFilter.toolCallDetected)
 }
 
 // executeOneCommand runs a single command and returns results.
@@ -706,19 +713,17 @@ func executeOneCommand(
 	cfg Config,
 	cbs Callbacks,
 	pendingCmd string,
-	fullText string,
+	persistText string,
 	reasoningBuf string,
 	reasoningSig string,
 	hallucinated bool,
-	usage fantasy.Usage,
-	meta fantasy.ProviderMetadata,
-) (string, string, string, bool, []string, fantasy.Usage, fantasy.ProviderMetadata, error) {
+) (string, string, string, bool, []string, error) {
 	if directive, ok := handleBlockedCommand(pendingCmd); ok {
 		if cbs.OnCommandResult != nil {
 			cbs.OnCommandResult(pendingCmd, directive, -2)
 		}
-		return fullText, reasoningBuf, reasoningSig, hallucinated,
-			[]string{directive}, usage, meta, nil
+		return persistText, reasoningBuf, reasoningSig, hallucinated,
+			[]string{directive}, nil
 	}
 
 	resp, err := cfg.runner.Run(ctx, client.RunRequest{
@@ -732,7 +737,7 @@ func executeOneCommand(
 		if cbs.OnCommandResult != nil {
 			cbs.OnCommandResult(pendingCmd, result, -1)
 		}
-		return fullText, reasoningBuf, reasoningSig, hallucinated, []string{result}, usage, meta, err
+		return persistText, reasoningBuf, reasoningSig, hallucinated, []string{result}, err
 	}
 
 	if resp == nil {
@@ -742,7 +747,7 @@ func executeOneCommand(
 		if cbs.OnCommandResult != nil {
 			cbs.OnCommandResult(pendingCmd, result, -1)
 		}
-		return fullText, reasoningBuf, reasoningSig, hallucinated, []string{result}, usage, meta, err
+		return persistText, reasoningBuf, reasoningSig, hallucinated, []string{result}, err
 	}
 
 	result := formatOneResult(Result{
@@ -756,7 +761,7 @@ func executeOneCommand(
 		cbs.OnCommandResult(pendingCmd, result, resp.ExitCode)
 	}
 
-	return fullText, reasoningBuf, reasoningSig, hallucinated, []string{result}, usage, meta, nil
+	return persistText, reasoningBuf, reasoningSig, hallucinated, []string{result}, nil
 }
 
 // extractCmdFromBlock extracts the command content from a <cmd>...</cmd> block.
