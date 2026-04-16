@@ -1138,3 +1138,98 @@ func TestRun_AllCallbacks_NilSafe(t *testing.T) {
 		_, _ = Run(context.Background(), withTestRunner(newCfg(model), runner), nil, "go", Callbacks{})
 	})
 }
+
+// mockLanguageModelWithUsage is like mockLanguageModel but emits custom usage in the finish event.
+type mockLanguageModelWithUsage struct {
+	model     string
+	usage     []fantasy.Usage // indexed by call
+	meta      fantasy.ProviderMetadata
+	call      int
+	maxCalls  int
+	responses []string // indexed by call, defaults to "hello" if nil
+}
+
+// mockProviderData implements fantasy.ProviderOptionsData for tests.
+type mockProviderData struct{}
+
+func (mockProviderData) Options()                     {}
+func (mockProviderData) MarshalJSON() ([]byte, error) { return []byte(`{}`), nil }
+func (mockProviderData) UnmarshalJSON([]byte) error   { return nil }
+
+func (m *mockLanguageModelWithUsage) Provider() string { return "mock" }
+func (m *mockLanguageModelWithUsage) Model() string    { return m.model }
+func (m *mockLanguageModelWithUsage) Generate(_ context.Context, _ fantasy.Call) (*fantasy.Response, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+func (m *mockLanguageModelWithUsage) GenerateObject(
+	_ context.Context, _ fantasy.ObjectCall,
+) (*fantasy.ObjectResponse, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+func (m *mockLanguageModelWithUsage) StreamObject(
+	_ context.Context, _ fantasy.ObjectCall,
+) (fantasy.ObjectStreamResponse, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+func (m *mockLanguageModelWithUsage) Stream(_ context.Context, _ fantasy.Call) (fantasy.StreamResponse, error) {
+	if m.call >= m.maxCalls {
+		return nil, fmt.Errorf("mock: no more responses")
+	}
+	call := m.call
+	m.call++
+	text := "hello"
+	if m.responses != nil && call < len(m.responses) {
+		text = m.responses[call]
+	}
+	return func(yield func(fantasy.StreamPart) bool) {
+		yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeTextDelta, Delta: text})
+		yield(fantasy.StreamPart{Type: fantasy.StreamPartTypeFinish, Usage: m.usage[call], ProviderMetadata: m.meta})
+	}, nil
+}
+
+func TestRun_UsagePopulated(t *testing.T) {
+	wantMeta := fantasy.ProviderMetadata{"openai": mockProviderData{}}
+	model := &mockLanguageModelWithUsage{
+		model:    "test-model",
+		usage:    []fantasy.Usage{{InputTokens: 42, OutputTokens: 100}},
+		meta:     wantMeta,
+		maxCalls: 1,
+	}
+	runner := &mockCommandRunner{response: client.RunResponse{Stdout: "ok", ExitCode: 0}}
+	cbs := Callbacks{}
+
+	result, err := Run(context.Background(), withTestRunner(newCfg(model), runner), nil, "say hello", cbs)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	assert.Equal(t, int64(42), result.Usage.InputTokens)
+	assert.Equal(t, int64(100), result.Usage.OutputTokens)
+	assert.Equal(t, wantMeta, result.ProviderMetadata)
+}
+
+func TestRun_UsageLastStepWins(t *testing.T) {
+	// Step 1: cmd → result, usage[0]. Step 2: final answer, usage[1].
+	// Result should reflect step 2 (last step wins).
+	model := &mockLanguageModelWithUsage{
+		model: "test-model",
+		usage: []fantasy.Usage{
+			{InputTokens: 1000, OutputTokens: 500},
+			{InputTokens: 2000, OutputTokens: 600},
+		},
+		responses: []string{
+			"<cmd>echo ok</cmd>", // step 1: triggers cmd execution → step 2
+			"final answer",       // step 2: no cmd → done
+		},
+		maxCalls: 2,
+	}
+	runner := &mockCommandRunner{response: client.RunResponse{Stdout: "ok", ExitCode: 0}}
+	cbs := Callbacks{}
+
+	result, err := Run(context.Background(), withTestRunner(newCfg(model), runner), nil, "run two commands", cbs)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	// Step 2's usage should be the one on the result (last step wins).
+	assert.Equal(t, int64(2000), result.Usage.InputTokens)
+	assert.Equal(t, int64(600), result.Usage.OutputTokens)
+}
